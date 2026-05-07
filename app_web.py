@@ -270,6 +270,15 @@ with tabs[1]:
                         f"OrderId:{res['order_id']} | Ticker:{ev['ticker']} "
                         f"| Venc:{ev['vencimiento']} | Crédito:{ev['credito_real']}"
                     )
+                    db.registrar_operacion(
+                        order_id   = res['order_id'],
+                        ticker     = ev['ticker'],
+                        vencimiento= ev['vencimiento'],
+                        strikes    = ev['strikes'],
+                        credito    = ev['credito_real'],
+                        metricas   = ev['metricas'],
+                        status     = res['status']
+                    )
                     del st.session_state['estrategia_validada']
                     st.rerun()
                 except Exception as e:
@@ -347,3 +356,44 @@ with tabs[2]:
         st.info("📭 Aún no se han registrado eventos en la base de datos. Los registros aparecerán aquí conforme el sistema opere.")
         if st.button("Actualizar"):
             st.rerun()
+
+    # --- HISTORIAL DE OPERACIONES EJECUTADAS ---
+    st.divider()
+    st.subheader("📂 Historial de Órdenes Ejecutadas (BAG)")
+    st.write("Registro financiero permanente de todas las órdenes Iron Condor transmitidas al bróker.")
+
+    df_ops = db.obtener_operaciones()
+
+    if df_ops is not None and not df_ops.empty:
+        total_ops    = len(df_ops)
+        credito_total = df_ops['credito'].sum()
+        beneficio_max = df_ops['max_beneficio'].sum()
+        riesgo_max    = df_ops['max_riesgo'].sum()
+
+        o1, o2, o3, o4 = st.columns(4)
+        o1.metric("Órdenes Enviadas",   total_ops)
+        o2.metric("Crédito Total",       f"${credito_total:.2f}")
+        o3.metric("Benef. Máx. Acum.",  f"${beneficio_max:.2f}")
+        o4.metric("Riesgo Máx. Acum.",  f"${riesgo_max:.2f}",   delta_color="inverse")
+
+        st.dataframe(
+            df_ops,
+            use_container_width=True,
+            column_config={
+                "fecha":         st.column_config.DatetimeColumn("Fecha",       format="D MMM YYYY, HH:mm:ss"),
+                "order_id":      st.column_config.NumberColumn("OrderId",       format="%d"),
+                "ticker":        "Ticker",
+                "vencimiento":   "Vencimiento",
+                "put_long":      st.column_config.NumberColumn("Put Long",      format="%.0f"),
+                "put_short":     st.column_config.NumberColumn("Put Short",     format="%.0f"),
+                "call_short":    st.column_config.NumberColumn("Call Short",    format="%.0f"),
+                "call_long":     st.column_config.NumberColumn("Call Long",     format="%.0f"),
+                "credito":       st.column_config.NumberColumn("Crédito/acc",  format="$%.2f"),
+                "max_beneficio": st.column_config.NumberColumn("Benef. Máx.",  format="$%.2f"),
+                "max_riesgo":    st.column_config.NumberColumn("Riesgo Máx.",  format="$%.2f"),
+                "status":        "Estado",
+            },
+            hide_index=True
+        )
+    else:
+        st.info("📦 Aún no se han ejecutado órdenes en esta sesión. Las órdenes BAG enviadas al bróker aparecerán aquí.")

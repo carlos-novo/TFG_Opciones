@@ -1,6 +1,6 @@
 # 📋 ESTADO DEL PROYECTO Y HOJA DE RUTA (`TODO.md`)
 
-**Última actualización:** 07/05/2026 — 12:48 (Fase 4 en curso, commit intermedio)
+**Última actualización:** 07/05/2026 — 12:51 (Fase 4 completada ✅)
 
 Este documento registra el progreso actual del TFG, los errores críticos que requieren atención inmediata y la planificación de las próximas fases de desarrollo.
 
@@ -30,6 +30,7 @@ Este documento registra el progreso actual del TFG, los errores críticos que re
 - [x] `enviar_orden_iron_condor()` — micro-sesión que califica, ensambla y transmite `LimitOrder(lmtPrice=-crédito)`.
 - [x] `ib.placeOrder()` integrado, captura `orderId` y `status` inicial.
 - [x] UI de confirmación con `st.warning` + botón `CONFIRMAR Y EJECUTAR` (patrón `session_state`).
+- [x] Tabla `operaciones` en SQLite: `registrar_operacion()` y `obtener_operaciones()` en `base_datos.py`. Historial con 12 columnas + métricas acumuladas en pestaña de Monitorización.
 
 ---
 
@@ -57,8 +58,8 @@ Este documento registra el progreso actual del TFG, los errores críticos que re
 
 ## 🚀 3. PRÓXIMOS PASOS (Fase 4: Ejecución)
 
-- [x] ~~Empaquetado, Middleware, Gestión y UI~~ → Movidos a **Hitos Completados** ↑
-- [ ] 🔧 **[PENDIENTE] Registro de Operaciones:** Crear tabla `operaciones` en SQLite para historial de órdenes ejecutadas (no solo logs de auditoría).
+- [x] ~~Empaquetado, Middleware, Gestión, UI y Registro~~ → Todos movidos a **Hitos Completados** ↑
+- ✅ **FASE 4 COMPLETADA AL 100%**
 
 ---
 
