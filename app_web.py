@@ -227,6 +227,55 @@ with tabs[1]:
             m2.metric("Máximo Beneficio", f"${metricas['max_beneficio']}")
             m3.metric("Máximo Riesgo", f"${metricas['max_riesgo']}", delta_color="inverse")
 
+            # Persistimos para el botón de ejecución (sobrevive al rerun de Streamlit)
+            st.session_state['estrategia_validada'] = {
+                'ticker':       ticker,
+                'vencimiento':  vencimiento,
+                'strikes':      [put_long, put_short, call_short, call_long],
+                'credito_real': credito_real,
+                'metricas':     metricas
+            }
+
+    # --- BLOQUE DE CONFIRMACIÓN Y EJECUCIÓN (persiste entre reruns) ---
+    if st.session_state.get('estrategia_validada'):
+        ev = st.session_state['estrategia_validada']
+        st.divider()
+        st.warning(
+            "⚠️ ZONA DE EJECUCIÓN — Esta acción envía una orden REAL a IBKR (Paper Trading). "
+            "Revisa los parámetros antes de confirmar."
+        )
+        col_info, col_btn = st.columns([3, 1])
+        col_info.markdown(
+            f"**Iron Condor `{ev['ticker']}`** · Venc: `{ev['vencimiento']}` "
+            f"· Strikes: `{ev['strikes']}` "
+            f"· Crédito: `${ev['credito_real']}` "
+            f"· Riesgo Máx: `${ev['metricas']['max_riesgo']}`"
+        )
+        if col_btn.button("🚀 CONFIRMAR Y EJECUTAR", type="primary", key="btn_ejecutar"):
+            with st.status("📡 Transmitiendo orden BAG al Gateway IBKR...", expanded=True) as status_ord:
+                try:
+                    res = st.session_state.broker.enviar_orden_iron_condor(
+                        ev['ticker'], ev['vencimiento'], ev['strikes'], ev['credito_real']
+                    )
+                    status_ord.update(
+                        label=f"✅ Orden enviada — OrderId: {res['order_id']}",
+                        state="complete"
+                    )
+                    st.success(
+                        f"✅ Orden BAG enviada. OrderId: `{res['order_id']}` "
+                        f"| Estado inicial: `{res['status']}`"
+                    )
+                    db.registrar_evento(
+                        "ORDEN_ENVIADA",
+                        f"OrderId:{res['order_id']} | Ticker:{ev['ticker']} "
+                        f"| Venc:{ev['vencimiento']} | Crédito:{ev['credito_real']}"
+                    )
+                    del st.session_state['estrategia_validada']
+                    st.rerun()
+                except Exception as e:
+                    status_ord.update(label="❌ Error en la transmisión", state="error")
+                    st.error(f"Fallo al enviar la orden BAG: {e}")
+
 with tabs[0]:
     st.header("Resumen de la Cuenta (Paper Trading)")
     

@@ -1,6 +1,6 @@
 # 📋 ESTADO DEL PROYECTO Y HOJA DE RUTA (`TODO.md`)
 
-**Última actualización:** 07/05/2026 — 12:18 (sesión de parches activa)
+**Última actualización:** 07/05/2026 — 12:48 (Fase 4 en curso, commit intermedio)
 
 Este documento registra el progreso actual del TFG, los errores críticos que requieren atención inmediata y la planificación de las próximas fases de desarrollo.
 
@@ -24,6 +24,12 @@ Este documento registra el progreso actual del TFG, los errores críticos que re
 - [x] Control de flujo de sesión mediante `st.session_state` y `st.stop()`.
 - [x] Creación del esquema de base de datos SQLite para auditoría.
 - [x] Consola de monitorización visual en la pestaña 3 de la UI.
+
+### Fase 4: Ejecución de Órdenes (Parcial)
+- [x] `construir_contrato_bag()` — contrato `BAG` con 4 `ComboLeg` [BUY, SELL, SELL, BUY].
+- [x] `enviar_orden_iron_condor()` — micro-sesión que califica, ensambla y transmite `LimitOrder(lmtPrice=-crédito)`.
+- [x] `ib.placeOrder()` integrado, captura `orderId` y `status` inicial.
+- [x] UI de confirmación con `st.warning` + botón `CONFIRMAR Y EJECUTAR` (patrón `session_state`).
 
 ---
 
@@ -51,11 +57,8 @@ Este documento registra el progreso actual del TFG, los errores críticos que re
 
 ## 🚀 3. PRÓXIMOS PASOS (Fase 4: Ejecución)
 
-- [ ] **Empaquetado de Orden Combo:** Desarrollar la lógica para crear un objeto `Contract` de tipo `BAG` que agrupe las 4 patas del Iron Condor.
-- [ ] **Middleware de Envío:** Crear la función `enviar_orden_iron_condor()` en `conexion_ibkr.py`.
-- [ ] **Gestión de Órdenes:** Implementar `ib.placeOrder()` y capturar el `orderId` para su seguimiento.
-- [ ] **Registro de Operaciones:** Crear tabla `operaciones` en SQLite para guardar el historial de órdenes ejecutadas (no solo los logs).
-- [ ] **UI de Confirmación:** Añadir diálogos de confirmación (`st.warning` / `st.button`) antes de la transmisión final de la orden.
+- [x] ~~Empaquetado, Middleware, Gestión y UI~~ → Movidos a **Hitos Completados** ↑
+- [ ] 🔧 **[PENDIENTE] Registro de Operaciones:** Crear tabla `operaciones` en SQLite para historial de órdenes ejecutadas (no solo logs de auditoría).
 
 ---
 

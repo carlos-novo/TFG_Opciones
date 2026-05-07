@@ -8,10 +8,9 @@ try:
 except RuntimeError:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-from ib_insync import IB, Stock, Index
+from ib_insync import IB, Stock, Index, Contract, ComboLeg, LimitOrder, Option
 
 import random
-from ib_insync import Option
 
 class GestorIBKR:
     """
@@ -263,3 +262,99 @@ class GestorIBKR:
             if ib_temp.isConnected():
                 ib_temp.disconnect()
             return []
+
+    def construir_contrato_bag(self, ticker, contratos_calificados):
+        """
+        Ensambla un contrato de tipo BAG (Combo) a partir de los 4 contratos
+        ya calificados (con conId asignado por IBKR).
+
+        Orden y dirección de las patas del Iron Condor:
+          [0] Long Put   → BUY  (protección inferior, pagamos prima)
+          [1] Short Put  → SELL (ingreso inferior, recibimos prima)
+          [2] Short Call → SELL (ingreso superior, recibimos prima)
+          [3] Long Call  → BUY  (protección superior, pagamos prima)
+        Resultado neto: CRÉDITO (recibimos más de lo que pagamos).
+        """
+        acciones = ['BUY', 'SELL', 'SELL', 'BUY']
+        patas = []
+        for contrato, accion in zip(contratos_calificados, acciones):
+            pata = ComboLeg()
+            pata.conId    = contrato.conId
+            pata.ratio    = 1
+            pata.action   = accion
+            pata.exchange = 'SMART'
+            patas.append(pata)
+
+        bag = Contract()
+        bag.symbol    = ticker
+        bag.secType   = 'BAG'
+        bag.currency  = 'USD'
+        bag.exchange  = 'SMART'
+        bag.comboLegs = patas
+        return bag
+
+    def enviar_orden_iron_condor(self, ticker, vencimiento, strikes, credito_objetivo):
+        """
+        Micro-sesión de envío atómico del Iron Condor como orden BAG.
+
+        Construye los 4 contratos, ensambla el BAG y transmite una LimitOrder
+        con precio NEGATIVO (convención IBKR para combos a crédito en dirección BUY):
+          lmtPrice = -credito_objetivo
+          Ejemplo: credito = 5.20 → lmtPrice = -5.20 (recibimos $520 por contrato).
+
+        Retorna: dict con order_id y status inicial de la orden.
+        """
+        self._asegurar_event_loop()
+        ib_temp = IB()
+        try:
+            ib_temp.connect(self.host, self.port, clientId=95)
+            ib_temp.reqMarketDataType(3)
+
+            p_long, p_short, c_short, c_long = strikes
+            fecha_str = (
+                vencimiento.strftime('%Y%m%d')
+                if hasattr(vencimiento, 'strftime')
+                else str(vencimiento).replace('-', '')
+            )
+
+            # 1. Definir y calificar los 4 contratos
+            contratos = [
+                Option(ticker, fecha_str, p_long,  'P', 'SMART', currency='USD'),
+                Option(ticker, fecha_str, p_short, 'P', 'SMART', currency='USD'),
+                Option(ticker, fecha_str, c_short, 'C', 'SMART', currency='USD'),
+                Option(ticker, fecha_str, c_long,  'C', 'SMART', currency='USD'),
+            ]
+            ib_temp.qualifyContracts(*contratos)
+
+            # Verificación de integridad: todos deben tener conId
+            for c in contratos:
+                if not c.conId:
+                    raise ValueError(
+                        f"Contrato no calificado: {c.strike}{c.right} "
+                        f"— El strike no existe para el vencimiento {fecha_str}."
+                    )
+
+            # 2. Ensamblar el contrato BAG
+            bag = self.construir_contrato_bag(ticker, contratos)
+
+            # 3. LimitOrder a crédito neto (precio negativo = recibimos dinero)
+            orden = LimitOrder(
+                action        = 'BUY',
+                totalQuantity = 1,
+                lmtPrice      = round(-credito_objetivo, 2)
+            )
+
+            # 4. Transmitir al Gateway
+            trade        = ib_temp.placeOrder(bag, orden)
+            ib_temp.sleep(1)  # Pausa para que el Gateway emita el ACK inicial
+            order_id     = trade.order.orderId
+            order_status = trade.orderStatus.status
+
+            ib_temp.disconnect()
+            return {"order_id": order_id, "status": order_status}
+
+        except Exception as e:
+            print(f"Error al enviar orden Iron Condor BAG: {e}")
+            if ib_temp.isConnected():
+                ib_temp.disconnect()
+            raise  # Re-lanzamos para que la UI muestre el mensaje
