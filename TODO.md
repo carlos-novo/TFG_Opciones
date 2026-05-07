@@ -1,6 +1,6 @@
 # 📋 ESTADO DEL PROYECTO Y HOJA DE RUTA (`TODO.md`)
 
-**Última actualización:** 07/05/2026 — 12:51 (Fase 4 completada ✅)
+**Última actualización:** 07/05/2026 — 13:01 (commit final pre-entrega)
 
 Este documento registra el progreso actual del TFG, los errores críticos que requieren atención inmediata y la planificación de las próximas fases de desarrollo.
 
@@ -32,6 +32,13 @@ Este documento registra el progreso actual del TFG, los errores críticos que re
 - [x] UI de confirmación con `st.warning` + botón `CONFIRMAR Y EJECUTAR` (patrón `session_state`).
 - [x] Tabla `operaciones` en SQLite: `registrar_operacion()` y `obtener_operaciones()` en `base_datos.py`. Historial con 12 columnas + métricas acumuladas en pestaña de Monitorización.
 
+### Fase 5: Pulido y Calidad de Código (Pre-entrega)
+- [x] Corregido bug crítico `st.warning(...)` — el argumento `Ellipsis` se sustituó por el mensaje real de bloqueo AT.
+- [x] Eliminados `st.stop()` y `st.toast()` duplicados en el flujo de validación SMA.
+- [x] Reemplazado `use_container_width=True` → `width='stretch'` en sidebar button (deprecación Streamlit).
+- [x] Eliminado método huérfano `obtener_precio_spy()` de `conexion_ibkr.py` — referenciaba `simbolo` indefinido. Su sustituto funcional es `obtener_precio_prueba(simbolo)`.
+- 📌 **Limitación conocida documentada:** El campo `status` en tabla `operaciones` captura el estado inicial (`Submitted`), no el estado final de ejecución. El seguimiento post-orden (polling de fills) queda fuera del alcance del TFG.
+
 ---
 
 ## 🔴 2. BUGS ACTIVOS (Prioridad Crítica)
@@ -56,10 +63,15 @@ Este documento registra el progreso actual del TFG, los errores críticos que re
 
 ---
 
-## 🚀 3. PRÓXIMOS PASOS (Fase 4: Ejecución)
+## 🚀 3. ROADMAP POST-TFG (Mejoras Futuras)
 
-- [x] ~~Empaquetado, Middleware, Gestión, UI y Registro~~ → Todos movidos a **Hitos Completados** ↑
+- [x] ~~Empaquetado, Middleware, Gestión, UI y Registro~~ → Todos completados ↑
 - ✅ **FASE 4 COMPLETADA AL 100%**
+
+### Mejoras Identificadas para Versión Futura
+- [ ] 🔄 **Seguimiento de Estado de Orden (Polling):** Implementar un mecanismo de consulta periódica del estado de la orden tras su envío (`ib.reqOpenOrders()` o suscripción a eventos `Trade`). Actualizar el campo `status` en la tabla `operaciones` cuando la orden pase de `Submitted` a `Filled`, `PartiallyFilled` o `Cancelled`. Requiere gestión de callbacks asíncronos en el patrón de micro-sesión.
+- [ ] 📊 **Panel de Posiciones Abiertas:** Mostrar las opciones en cartera en tiempo real mediante `ib.portfolio()` en la pestaña de Dashboard.
+- [ ] ❌ **Función de Cancelación de Orden:** Añadir `ib.cancelOrder(orderId)` con confirmación en la UI para órdenes en estado `Submitted`.
 
 ---
 

@@ -68,7 +68,7 @@ if 'precio_test' not in st.session_state:
 st.sidebar.title("Configuración de Red")
 
 # Botón de Cerrar Sesión añadido en la parte superior del sidebar
-if st.sidebar.button("🚪 Cerrar Sesión", use_container_width=True):
+if st.sidebar.button("🚪 Cerrar Sesión", width='stretch'):
     st.session_state['autenticado'] = False
     if st.session_state.broker.esta_conectado():
         st.session_state.broker.desconectar()
@@ -177,15 +177,15 @@ with tabs[1]:
                             status.update(label="⛔ Entrada Bloqueada por Regla AT", state="error")
                             # REGISTRO EN BD (Intento fallido)
                             db.registrar_evento("ESTRATEGIA_BLOQUEADA", f"Ticker: {ticker} | Regla: {tipo_cruce}")
-                            st.warning(...)
-                            st.stop()
-                            st.warning(f"Entrada BLOQUEADA. El precio (${precio_actual}) no cumple '{tipo_cruce}' respecto a la SMA (${validacion['valor_sma']}).")
+                            st.warning(
+                                f"Entrada BLOQUEADA. El precio (${precio_actual}) no cumple "
+                                f"'{tipo_cruce}' respecto a la SMA (${validacion['valor_sma']})."
+                            )
                             st.stop()
                         
+                        # Filtro AT superado — notificación y registro en BD
                         st.toast(f"Filtro AT superado: SMA {validacion['valor_sma']}", icon="✅")
-                        # Si pasa la validación:
                         db.registrar_evento("ESTRATEGIA_AUTORIZADA", f"Ticker: {ticker} | SMA: {validacion['valor_sma']}")
-                        st.toast(f"Filtro AT superado: SMA {validacion['valor_sma']}", icon="✅")
                     
                     except Exception as e:
                         status.update(label="❌ Error en cálculo de SMA", state="error")

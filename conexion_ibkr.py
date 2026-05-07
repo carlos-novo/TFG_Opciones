@@ -64,36 +64,7 @@ class GestorIBKR:
         """Devuelve el estado actual de la conexión."""
         return self.ib.isConnected()
 
-    def obtener_precio_spy(self):
-        """
-        Método de prueba: Solicita el precio del ETF SPY.
-        Retorna el último precio negociado o el precio de cierre si el mercado está cerrado.
-        """
-        if not self.esta_conectado():
-            return None
 
-        self._asegurar_event_loop()
-        
-        # 1. Definimos el contrato
-        if simbolo.upper() == 'SPX':
-            contrato = Index(simbolo, 'CBOE', 'USD') # Los índices suelen ir por CBOE
-        else:
-            contrato = Stock(simbolo, 'SMART', 'USD')
-
-        self.ib.qualifyContracts(contrato)
-        
-        # 2. Solicitamos datos (Tipo 3 = Datos retrasados, ideal para Paper Trading si no hay suscripciones)
-        self.ib.reqMarketDataType(3)
-        
-        # 3. Pedimos los datos al mercado
-        ticker = self.ib.reqMktData(contrato, '', False, False)
-        
-        # 4. Pausa no bloqueante para dar tiempo a que los datos lleguen por los sockets
-        self.ib.sleep(2)
-        
-        # 5. Extraemos el precio (last si existe, sino close)
-        precio = ticker.last if (ticker.last is not None and ticker.last > 0) else ticker.close
-        return precio
 
     def obtener_resumen_cuenta(self):
         """
