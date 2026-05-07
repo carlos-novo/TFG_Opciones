@@ -8,7 +8,7 @@ try:
 except RuntimeError:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-from ib_insync import IB, Stock
+from ib_insync import IB, Stock, Index
 
 import random
 from ib_insync import Option
@@ -145,7 +145,11 @@ class GestorIBKR:
             # Nos conectamos, pedimos el dato al Gateway y preparamos la huida
             ib_temp.connect(self.host, self.port, clientId=99)
             
-            contrato = Stock(simbolo, 'SMART', 'USD')
+            # REGLA DE ORO: SPX es un índice, el resto son Stocks
+            if simbolo.upper() == 'SPX':
+                contrato = Index(simbolo, 'CBOE', 'USD')
+            else:
+                contrato = Stock(simbolo, 'SMART', 'USD')
             ib_temp.qualifyContracts(contrato)
             
             barras = ib_temp.reqHistoricalData(
@@ -228,7 +232,11 @@ class GestorIBKR:
             # Usamos un clientId distinto (ej. 97) para el flujo de histórico
             ib_temp.connect(self.host, self.port, clientId=97)
             
-            contrato = Stock(simbolo, 'SMART', 'USD')
+            # REGLA DE ORO: SPX es un índice, el resto son Stocks
+            if simbolo.upper() == 'SPX':
+                contrato = Index(simbolo, 'CBOE', 'USD')
+            else:
+                contrato = Stock(simbolo, 'SMART', 'USD')
             ib_temp.qualifyContracts(contrato)
             
             # Formateamos la duración. IBKR acepta 'D' (días). 

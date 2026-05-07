@@ -1,4 +1,5 @@
 import sqlite3
+import os
 from datetime import datetime
 
 class GestorBaseDatos:
@@ -7,12 +8,15 @@ class GestorBaseDatos:
     Actúa como un log de auditoría para registrar eventos críticos del bot.
     """
     def __init__(self, db_name="tfg_trading.db"):
-        self.db_name = db_name
+        # REGLA ARCHITECTURE.md: Ruta absoluta anclada al directorio del script.
+        # Evita el desplazamiento de Working Directory de Streamlit.
+        _dir_actual = os.path.dirname(os.path.abspath(__file__))
+        self.db_path = os.path.join(_dir_actual, db_name)
         self._crear_tablas()
 
     def _conectar(self):
-        """Abre una conexión a la base de datos local."""
-        return sqlite3.connect(self.db_name)
+        """Abre una conexión a la base de datos local usando ruta absoluta."""
+        return sqlite3.connect(self.db_path)
 
     def _crear_tablas(self):
         """Crea las tablas necesarias si no existen (Patrón Singleton de BD)."""
