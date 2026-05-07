@@ -1,0 +1,300 @@
+import streamlit as st
+import hashlib
+from conexion_ibkr import GestorIBKR
+from motor_logica import MotorEstrategias
+from base_datos import GestorBaseDatos
+
+db = GestorBaseDatos()
+
+# --- 0. CONFIGURACIÓN DE PÁGINA (Debe ser el primer comando de Streamlit) ---
+st.set_page_config(page_title="Plataforma de Trading", layout="wide")
+
+# --- 1. LÓGICA DE SEGURIDAD Y ENCRIPTACIÓN ---
+# Usuario: admin | Contraseña para generar el hash: admin2026
+ADMIN_USER = "admin"
+ADMIN_PASSWORD_HASH = "6051fc84a7a0d74c225fb18a496b09952da5642e60723ecae543298edd7d82d6"
+
+def verificar_credenciales(usuario, password):
+    """Encripta la contraseña introducida y la compara con el hash seguro."""
+    hash_input = hashlib.sha256(password.encode()).hexdigest()
+    return usuario == ADMIN_USER and hash_input == ADMIN_PASSWORD_HASH
+
+# Inicializamos la variable de sesión para el control de acceso
+if 'autenticado' not in st.session_state:
+    st.session_state['autenticado'] = False
+
+
+# --- 2. BARRERA DE ENTRADA (PANTALLA DE LOGIN) ---
+if not st.session_state['autenticado']:
+    
+    # Usamos columnas para centrar el formulario de login en la pantalla
+    col1, col2, col3 = st.columns([1, 1, 1])
+    
+    with col2:
+        st.title("🔐 Acceso Restringido")
+        st.info("Introduce tus credenciales para acceder al sistema algorítmico.")
+        
+        with st.form("login_form"):
+            user_input = st.text_input("Usuario")
+            pass_input = st.text_input("Contraseña", type="password")
+            submit_login = st.form_submit_button("Entrar al Sistema")
+            
+            if submit_login:
+                if verificar_credenciales(user_input, pass_input):
+                    st.session_state['autenticado'] = True
+                    st.rerun() # Fuerza la recarga para pasar la barrera
+                    # --- REGISTRO EN BD ---
+                    db.registrar_evento("LOGIN_EXITOSO", f"Usuario '{user_input}' ha accedido al sistema.")
+                    st.rerun()
+                else:
+                    st.error("Credenciales incorrectas. Acceso denegado.")
+    
+    # st.stop() detiene la ejecución del script aquí. 
+    # El código del bróker que hay debajo NO se ejecutará si no hay login.
+    st.stop() 
+
+
+# =====================================================================
+# --- 3. APLICACIÓN PRINCIPAL (SOLO ACCESIBLE SI AUTENTICADO == TRUE) ---
+# =====================================================================
+
+# Inicializamos la clase gestora en el estado de la sesión para no perderla en las recargas
+if 'broker' not in st.session_state:
+    st.session_state.broker = GestorIBKR(port=4002) # Cambiar a 4002 si usas Gateway puro
+if 'precio_test' not in st.session_state:
+    st.session_state.precio_test = None
+
+# --- BARRA LATERAL (SIDEBAR) ---
+st.sidebar.title("Configuración de Red")
+
+# Botón de Cerrar Sesión añadido en la parte superior del sidebar
+if st.sidebar.button("🚪 Cerrar Sesión", use_container_width=True):
+    st.session_state['autenticado'] = False
+    if st.session_state.broker.esta_conectado():
+        st.session_state.broker.desconectar()
+    st.rerun()
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Prueba de Conectividad")
+
+# Lógica del botón de conexión
+if st.sidebar.button("Alternar Conexión al Bróker"):
+    if st.session_state.broker.esta_conectado():
+        st.session_state.broker.desconectar()
+    else:
+        st.session_state.broker.conectar()
+    st.rerun() # Fuerza la recarga para actualizar los indicadores visuales
+
+# Indicador visual de estado
+conectado = st.session_state.broker.esta_conectado()
+color = "🟢" if conectado else "🔴"
+texto_estado = "Conectado" if conectado else "Desconectado"
+st.sidebar.metric(label="Estado IBKR", value=f"{color} {texto_estado}")
+
+# Campo para elegir qué ticker probar
+ticker_test = st.sidebar.text_input("Ticker a probar", value="SPY", max_chars=5).upper()
+
+if st.sidebar.button("Probar Datos de Mercado"):
+    if conectado:
+        with st.sidebar.status("Consultando bróker...", expanded=False) as status:
+            precio = st.session_state.broker.obtener_precio_prueba(ticker_test)
+            
+            if precio:
+                status.update(label=f"¡Éxito! {ticker_test}: ${precio}", state="complete")
+                st.sidebar.success(f"Último precio de {ticker_test}: **${precio}**")
+            else:
+                status.update(label="Fallo en la consulta", state="error")
+                st.sidebar.error("No se recibió precio. Verifica que el ticker es válido.")
+    else:
+        st.sidebar.warning("⚠️ Debes estar conectado para probar datos.")
+
+
+# --- ÁREA PRINCIPAL ---
+st.title("Panel de Control - Algorítmico de Opciones")
+
+tabs = st.tabs(["📊 Dashboard", "⚙️ Nueva Estrategia", "📈 Monitorización"])
+
+with tabs[1]:
+    st.header("Definición de Estrategia: Iron Condor")
+    
+    with st.form("form_iron_condor"):
+        # 1. PARÁMETROS DEL ACTIVO
+        col1, col2 = st.columns(2)
+        ticker = col1.text_input("Ticker del Subyacente", value="SPX")
+        vencimiento = col2.date_input("Fecha de Vencimiento")
+        
+        st.divider()
+        st.subheader("Configuración de las Patas (Strikes)")
+        c1, c2, c3, c4 = st.columns(4)
+        put_long = c1.number_input("Put Long", step=5.0, value=4800.0)
+        put_short = c2.number_input("Put Short", step=5.0, value=4900.0)
+        call_short = c3.number_input("Call Short", step=5.0, value=5100.0)
+        call_long = c4.number_input("Call Long", step=5.0, value=5200.0)
+        
+        st.divider()
+        # 2. SECCIÓN DE CONDICIONES ALGORÍTMICAS (ANÁLISIS TÉCNICO)
+        with st.expander("🛠️ Condiciones Algorítmicas (Análisis Técnico)"):
+            st.write("Configura el cruce de Medias Móviles (SMA) para condicionar la entrada.")
+            col_at1, col_at2 = st.columns(2)
+            activar_sma = col_at1.checkbox("Activar Condición SMA")
+            periodo_n = col_at2.number_input("Periodo N días", min_value=1, value=200, step=10)
+            tipo_cruce = st.selectbox("Regla de Ejecución", [
+                "Entrar si Precio > SMA", 
+                "Entrar si Precio < SMA"
+            ])
+
+        # 3. ENVÍO DEL FORMULARIO Y LÓGICA DEL MOTOR
+        submit = st.form_submit_button("Lanzar Estrategia")
+        
+    # Lógica de procesamiento tras el envío del formulario
+    if submit:
+        if not conectado:
+            st.error("⚠️ Error: El sistema debe estar conectado al Gateway para lanzar estrategias.")
+        else:
+            # Iniciamos el contenedor de estado para la telemetría del bot
+            with st.status("🚀 Ejecutando Validación Algorítmica...", expanded=True) as status:
+                
+                # PASO 1: Obtener precio actual del subyacente
+                status.write("🔍 Consultando precio actual del subyacente...")
+                precio_actual = st.session_state.broker.obtener_precio_prueba(ticker)
+                
+                if not precio_actual:
+                    status.update(label="❌ Error: No se pudo obtener el precio", state="error")
+                    st.error("No se ha podido recuperar el precio actual. Verifica el Ticker.")
+                    st.stop() # Detiene la ejecución de este bloque
+
+                # PASO 2: Validación de Análisis Técnico (SMA)
+                if activar_sma:
+                    status.write(f"📈 Calculando Media Móvil (SMA {periodo_n})...")
+                    try:
+                        validacion = MotorEstrategias.evaluar_condicion_sma(
+                            st.session_state.broker, ticker, periodo_n, tipo_cruce, precio_actual
+                        )
+                        
+                        status.write(f"⚖️ Validando Regla: {tipo_cruce} (SMA: {validacion['valor_sma']})")
+                        
+                        if not validacion["autorizado"]:
+                            status.update(label="⛔ Entrada Bloqueada por Regla AT", state="error")
+                            # REGISTRO EN BD (Intento fallido)
+                            db.registrar_evento("ESTRATEGIA_BLOQUEADA", f"Ticker: {ticker} | Regla: {tipo_cruce}")
+                            st.warning(...)
+                            st.stop()
+                            st.warning(f"Entrada BLOQUEADA. El precio (${precio_actual}) no cumple '{tipo_cruce}' respecto a la SMA (${validacion['valor_sma']}).")
+                            st.stop()
+                        
+                        st.toast(f"Filtro AT superado: SMA {validacion['valor_sma']}", icon="✅")
+                        # Si pasa la validación:
+                        db.registrar_evento("ESTRATEGIA_AUTORIZADA", f"Ticker: {ticker} | SMA: {validacion['valor_sma']}")
+                        st.toast(f"Filtro AT superado: SMA {validacion['valor_sma']}", icon="✅")
+                    
+                    except Exception as e:
+                        status.update(label="❌ Error en cálculo de SMA", state="error")
+                        st.error(f"Fallo al evaluar la condición técnica: {e}")
+                        st.stop()
+
+                # PASO 3: Consultar Opciones y calcular crédito real
+                status.write("⛓️ Consultando primas de las 4 patas del Iron Condor...")
+                try:
+                    resultado = MotorEstrategias.calcular_credito_real_iron_condor(
+                        st.session_state.broker, ticker, vencimiento, put_long, put_short, call_short, call_long
+                    )
+                    
+                    credito_real = resultado["credito_neto"]
+                    metricas = MotorEstrategias.calcular_metricas_iron_condor(
+                        put_long, put_short, call_short, call_long, credito_real
+                    )
+                    
+                    status.update(label="✅ Validación Completa y Autorizada", state="complete")
+                    
+                except Exception as e:
+                    status.update(label="❌ Error al consultar opciones", state="error")
+                    st.error(f"Error en el Motor de Agregación: {e}")
+                    st.stop()
+
+            # --- PRESENTACIÓN FINAL DE RESULTADOS (Fuera del status) ---
+            st.success(f"Estrategia '{ticker}' validada y lista para ejecución.")
+            
+            with st.expander("🔍 Ver desglose de Primas de Mercado (Bid/Ask)"):
+                d = resultado["detalle"]
+                col_a, col_b = st.columns(2)
+                col_a.write(f"* **Short Put (Bid):** ${d['p_short_bid']}")
+                col_a.write(f"* **Short Call (Bid):** ${d['c_short_bid']}")
+                col_b.write(f"* **Long Put (Ask):** ${d['p_long_ask']}")
+                col_b.write(f"* **Long Call (Ask):** ${d['c_long_ask']}")
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Crédito Real Neto", f"${credito_real}")
+            m2.metric("Máximo Beneficio", f"${metricas['max_beneficio']}")
+            m3.metric("Máximo Riesgo", f"${metricas['max_riesgo']}", delta_color="inverse")
+
+with tabs[0]:
+    st.header("Resumen de la Cuenta (Paper Trading)")
+    
+    if conectado:
+        # Obtenemos los datos desde la clase gestora
+        with st.spinner("Sincronizando cuenta con IBKR..."):
+            datos = st.session_state.broker.obtener_resumen_cuenta()
+            
+        if datos:
+            col1, col2, col3 = st.columns(3)
+            # st.metric aplica formato automáticamente, ideal para dashboards financieros
+            col1.metric("Net Liquidation", f"${float(datos['NetLiquidation']):,.2f}")
+            col2.metric("Buying Power", f"${float(datos['BuyingPower']):,.2f}")
+            col3.metric("P&L Diario (Irrealizado)", f"${float(datos['DailyPnL']):,.2f}")
+        else:
+            st.warning("Conectado, pero esperando datos de la cuenta...")
+    else:
+        st.info("💡 Conéctate al bróker en la barra lateral para ver los datos de tu cuenta en tiempo real.")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Net Liquidation", "---")
+        col2.metric("Buying Power", "---")
+        col3.metric("P&L Diario", "---")
+
+with tabs[2]:
+    st.header("📊 Consola de Monitorización y Auditoría")
+    st.write("Historial de actividad y decisiones del motor algorítmico.")
+
+    # 1. OBTENCIÓN DE DATOS
+    # Llamamos al método de la base de datos
+    df_logs = db.obtener_logs()
+
+    if df_logs is not None and not df_logs.empty:
+        # 2. CÁLCULO DE MÉTRICAS ESTADÍSTICAS (Resumen rápido)
+        total_eventos = len(df_logs)
+        accesos = len(df_logs[df_logs['evento'] == 'LOGIN_EXITOSO'])
+        autorizadas = len(df_logs[df_logs['evento'] == 'ESTRATEGIA_AUTORIZADA'])
+        bloqueadas = len(df_logs[df_logs['evento'] == 'ESTRATEGIA_BLOQUEADA'])
+
+        # Mostrar métricas en columnas profesionales
+        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+        col_m1.metric("Total Eventos", total_eventos)
+        col_m2.metric("Accesos", accesos)
+        col_m3.metric("Autorizadas ✅", autorizadas)
+        col_m4.metric("Bloqueadas ⛔", bloqueadas, delta_color="inverse")
+
+        st.divider()
+
+        # 3. BOTÓN DE ACTUALIZACIÓN MANUAL
+        if st.button("🔄 Refrescar Logs de Auditoría"):
+            st.rerun()
+
+        # 4. VISUALIZACIÓN DE LA TABLA DE LOGS
+        st.subheader("Registro Detallado de Actividad")
+        st.dataframe(
+            df_logs,
+            use_container_width=True,
+            column_config={
+                "fecha": st.column_config.DatetimeColumn(
+                    "Marca de Tiempo",
+                    format="D MMM YYYY, HH:mm:ss",
+                ),
+                "evento": "Tipo de Evento",
+                "detalles": "Información del Motor"
+            },
+            hide_index=True # Ocultamos el índice para que parezca una tabla limpia
+        )
+        
+    else:
+        st.info("📭 Aún no se han registrado eventos en la base de datos. Los registros aparecerán aquí conforme el sistema opere.")
+        if st.button("Actualizar"):
+            st.rerun()
