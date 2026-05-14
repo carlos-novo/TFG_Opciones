@@ -1,8 +1,10 @@
 import streamlit as st
 import hashlib
+from datetime import date
 from conexion_ibkr import GestorIBKR
 from motor_logica import MotorEstrategias
 from base_datos import GestorBaseDatos
+from motor_bs import MotorBlackScholes
 
 db = GestorBaseDatos()
 
@@ -132,7 +134,12 @@ with tabs[1]:
         call_long = c4.number_input("Call Long", step=5.0, value=5200.0)
         
         st.divider()
-        # 2. SECCIÓN DE CONDICIONES ALGORÍTMICAS (ANÁLISIS TÉCNICO)
+        # 2. PARÁMETROS BLACK-SCHOLES Y ALGORÍTMICOS
+        with st.expander("🧮 Parámetros Black-Scholes (Para Griegas y Heatmap)"):
+            c_bs1, c_bs2 = st.columns(2)
+            volatilidad = c_bs1.slider("Volatilidad Implícita (σ)", min_value=0.05, max_value=0.50, value=0.15, step=0.01)
+            tasa_riesgo = c_bs2.slider("Tasa Libre de Riesgo (r)", min_value=0.0, max_value=0.10, value=0.05, step=0.01)
+
         with st.expander("🛠️ Condiciones Algorítmicas (Análisis Técnico)"):
             st.write("Configura el cruce de Medias Móviles (SMA) para condicionar la entrada.")
             col_at1, col_at2 = st.columns(2)
@@ -221,6 +228,21 @@ with tabs[1]:
                 col_a.write(f"* **Short Call (Bid):** ${d['c_short_bid']}")
                 col_b.write(f"* **Long Put (Ask):** ${d['p_long_ask']}")
                 col_b.write(f"* **Long Call (Ask):** ${d['c_long_ask']}")
+                
+            with st.expander("📐 Greeks (Black-Scholes)"):
+                dias_vencimiento = (vencimiento - date.today()).days
+                T = max(dias_vencimiento / 365.0, 1e-5)
+                g_pl = MotorBlackScholes.calcular_greeks(precio_actual, put_long, T, tasa_riesgo, volatilidad, 'P')
+                g_ps = MotorBlackScholes.calcular_greeks(precio_actual, put_short, T, tasa_riesgo, volatilidad, 'P')
+                g_cs = MotorBlackScholes.calcular_greeks(precio_actual, call_short, T, tasa_riesgo, volatilidad, 'C')
+                g_cl = MotorBlackScholes.calcular_greeks(precio_actual, call_long, T, tasa_riesgo, volatilidad, 'C')
+                
+                st.write("**Sensibilidades calculadas teóricamente:**")
+                g1, g2 = st.columns(2)
+                g1.write(f"**Long Put:** Δ {g_pl['delta']} | Θ {g_pl['theta']} | V {g_pl['vega']}")
+                g1.write(f"**Short Put:** Δ {g_ps['delta']} | Θ {g_ps['theta']} | V {g_ps['vega']}")
+                g2.write(f"**Short Call:** Δ {g_cs['delta']} | Θ {g_cs['theta']} | V {g_cs['vega']}")
+                g2.write(f"**Long Call:** Δ {g_cl['delta']} | Θ {g_cl['theta']} | V {g_cl['vega']}")
 
             m1, m2, m3 = st.columns(3)
             m1.metric("Crédito Real Neto", f"${credito_real}")
@@ -233,7 +255,10 @@ with tabs[1]:
                 'vencimiento':  vencimiento,
                 'strikes':      [put_long, put_short, call_short, call_long],
                 'credito_real': credito_real,
-                'metricas':     metricas
+                'metricas':     metricas,
+                'tasa_riesgo':  tasa_riesgo,
+                'volatilidad':  volatilidad,
+                'precio_actual': precio_actual
             }
 
     # --- BLOQUE DE CONFIRMACIÓN Y EJECUCIÓN (persiste entre reruns) ---
@@ -284,6 +309,18 @@ with tabs[1]:
                 except Exception as e:
                     status_ord.update(label="❌ Error en la transmisión", state="error")
                     st.error(f"Fallo al enviar la orden BAG: {e}")
+                    
+        # --- BLOQUE DE ANÁLISIS DE SENSIBILIDAD B-S ---
+        st.divider()
+        st.subheader("🔥 Análisis Cuantitativo B-S (Heatmap)")
+        st.write("Genera un mapa de calor para evaluar cómo varía el ratio B/R si desplazamos los strikes.")
+        if st.button("Generar Heatmap de Sensibilidad (B/R)"):
+            with st.spinner("Calculando malla Black-Scholes..."):
+                dias_venc = (ev['vencimiento'] - date.today()).days
+                fig = MotorBlackScholes.generar_heatmap_ic(
+                    ev['precio_actual'], ev['tasa_riesgo'], ev['volatilidad'], dias_venc, ev['strikes']
+                )
+                st.pyplot(fig)
 
 with tabs[0]:
     st.header("Resumen de la Cuenta (Paper Trading)")
