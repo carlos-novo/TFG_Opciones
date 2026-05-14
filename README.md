@@ -1,10 +1,10 @@
 # 🦅 OptiTrack-IBKR: Plataforma Algorítmica de Negociación de Opciones
 
-[![Tests](https://github.com/USER/OptiTrack-IBKR/actions/workflows/tests.yml/badge.svg)](https://github.com/USER/OptiTrack-IBKR/actions)
+[![Tests](https://github.com/carlos-novo/TFG_Opciones/actions/workflows/tests.yml/badge.svg)](https://github.com/carlos-novo/TFG_Opciones/actions)
 
 **OptiTrack-IBKR** es un sistema de trading algorítmico de alta fidelidad diseñado para la gestión y ejecución automatizada de estrategias de opciones financieras, con un enfoque específico en la estructura **Iron Condor**. La plataforma actúa como un middleware avanzado entre el analista cuantitativo y el mercado real a través de la infraestructura de **Interactive Brokers (IBKR)**.
 
-Desarrollado como **Trabajo de Fin de Grado en Ingeniería Telemática**, este proyecto aborda desafíos críticos en la ingeniería de software distribuido, manejo de concurrencia asíncrona (patrón *Bulk Session*) y sistemas de baja latencia.
+Desarrollado por **Carlos Novo** como **Trabajo de Fin de Grado en Ingeniería Telemática**, este proyecto aborda desafíos críticos en la ingeniería de software distribuido, manejo de concurrencia asíncrona (patrón *Bulk Session*) y sistemas de baja latencia.
 
 ---
 
@@ -23,7 +23,7 @@ Para ejecutar este proyecto, necesitas:
 
 1. **Clonar el repositorio y preparar el entorno virtual:**
    ```bash
-   git clone <URL_DEL_REPOSITORIO>
+   git clone https://github.com/carlos-novo/TFG_Opciones.git
    cd TFG_Opciones
    python -m venv .venv
    
