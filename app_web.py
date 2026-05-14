@@ -400,9 +400,19 @@ with tabs[2]:
 
         st.divider()
 
-        # 3. BOTÓN DE ACTUALIZACIÓN MANUAL
-        if st.button("🔄 Refrescar Logs de Auditoría"):
-            st.rerun()
+        # 3. BOTÓN DE ACTUALIZACIÓN Y EXPORTACIÓN
+        col_btn1, col_btn2 = st.columns([1, 4])
+        with col_btn1:
+            if st.button("🔄 Refrescar Logs de Auditoría"):
+                st.rerun()
+        with col_btn2:
+            csv_logs = df_logs.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Exportar Logs a CSV",
+                data=csv_logs,
+                file_name="auditoria_logs_tfg.csv",
+                mime="text/csv",
+            )
 
         # 4. VISUALIZACIÓN DE LA TABLA DE LOGS
         st.subheader("Registro Detallado de Actividad")
@@ -443,6 +453,15 @@ with tabs[2]:
         o2.metric("Crédito Total",       f"${credito_total:.2f}")
         o3.metric("Benef. Máx. Acum.",  f"${beneficio_max:.2f}")
         o4.metric("Riesgo Máx. Acum.",  f"${riesgo_max:.2f}",   delta_color="inverse")
+
+        # Exportación CSV del historial de operaciones
+        csv_ops = df_ops.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Exportar Historial a CSV",
+            data=csv_ops,
+            file_name="historial_operaciones_tfg.csv",
+            mime="text/csv",
+        )
 
         st.dataframe(
             df_ops,
