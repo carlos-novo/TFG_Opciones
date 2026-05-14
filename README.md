@@ -1,46 +1,96 @@
-# OptiTrack-IBKR: Plataforma Algorítmica de Negociación de Opciones
+# 🦅 OptiTrack-IBKR: Plataforma Algorítmica de Negociación de Opciones
 
-**OptiTrack-IBKR** es un sistema de trading algorítmico de alta fidelidad diseñado para la gestión y ejecución automatizada de estrategias de opciones financieras complejas, con un enfoque específico en la estructura **Iron Condor**. La plataforma actúa como un middleware avanzado entre el analista cuantitativo y el mercado real a través de la infraestructura de **Interactive Brokers (IBKR)**.
+[![Tests](https://github.com/USER/OptiTrack-IBKR/actions/workflows/tests.yml/badge.svg)](https://github.com/USER/OptiTrack-IBKR/actions)
 
-## 🛠️ Stack Tecnológico
-* **Frontend / UI:** Streamlit
-* **Middleware / Red:** `ib_insync`, `asyncio`, `nest_asyncio`
-* **Cálculo Cuantitativo:** Pandas, Numpy
-* **Persistencia:** SQLite3
-* **Seguridad:** hashlib (SHA-256)
+**OptiTrack-IBKR** es un sistema de trading algorítmico de alta fidelidad diseñado para la gestión y ejecución automatizada de estrategias de opciones financieras, con un enfoque específico en la estructura **Iron Condor**. La plataforma actúa como un middleware avanzado entre el analista cuantitativo y el mercado real a través de la infraestructura de **Interactive Brokers (IBKR)**.
 
-## 🎓 Justificación Académica (Ingeniería Telemática)
-
-Este proyecto se ha desarrollado como Trabajo de Fin de Grado en **Ingeniería Telemática**, abordando desafíos críticos en la ingeniería de software distribuido y de baja latencia:
-
-* **Concurrencia de Red y Asincronismo:** Implementación de una arquitectura no bloqueante mediante `asyncio` y `nest_asyncio`, permitiendo la convivencia de flujos de datos en tiempo real provenientes de la API de IBKR (Puerto 4002) con una interfaz de usuario reactiva.
-* **Arquitectura de Micro-sesiones:** Diseño de un patrón de comunicación eficiente que gestiona de forma aislada la obtención de datos históricos, la consulta de puntas de mercado (Bid/Ask) y el envío de órdenes, evitando la saturación de sockets y la generación de hilos "zombis".
-* **Persistencia y Gestión de Estado:** Implementación de un motor de persistencia local para garantizar la integridad de los datos y la recuperación del estado del sistema ante desconexiones de red.
-* **Seguridad Telemática:** Aplicación de protocolos de control de acceso basados en estándares criptográficos para la protección de la operativa financiera.
-
-## 📈 Flujo de Negocio (Core Logic)
-
-El sistema opera bajo un flujo determinista basado en reglas para minimizar el riesgo operativo y maximizar la precisión en la entrada:
-
-1.  **Evaluación de Condiciones Algorítmicas:** El motor utiliza la librería `Pandas` para procesar series temporales de precios históricos, calculando la **Media Móvil Simple (SMA)**. La estrategia solo se autoriza si el precio actual respeta la regla técnica definida (p. ej., Precio > SMA 200).
-2.  **Extracción de Puntas de Mercado:** Se realiza una consulta simultánea de las primas reales (**Bid/Ask**) para las cuatro patas que componen el Iron Condor (Long Put, Short Put, Short Call, Long Call).
-3.  **Cálculo Cuantitativo de Riesgo:** Basándose en los diferenciales reales de mercado, el sistema calcula el **Crédito Neto**, el **Beneficio Máximo** y el **Riesgo Máximo**. Este paso es crítico para descartar estrategias donde el *spread* de mercado degrada la relación Riesgo/Beneficio.
-4.  **Ejecución de Orden Combo:** Una vez validada la estrategia, el sistema construye una orden compleja de tipo **BAG (Combo)**, garantizando que las cuatro operaciones se ejecuten de forma atómica para evitar el riesgo de ejecución parcial.
-
-## 🔐 Seguridad y Auditoría
-
-Dada la naturaleza financiera del proyecto, se han integrado capas de seguridad siguiendo los principios de las normativas **Fintech**:
-
-* **Autenticación Blindada:** El acceso a la plataforma está restringido mediante un sistema de credenciales que utiliza **hashing SHA-256**. El sistema nunca almacena contraseñas en texto plano, comparando únicamente los hashes unidireccionales para autorizar la sesión.
-* **Audit Trail Inmutable:** Todas las acciones críticas (accesos de usuario, validaciones del algoritmo, bloqueos por condiciones técnicas y ejecuciones) se registran en una base de datos **SQLite**. Este registro de auditoría es inmutable y proporciona una trazabilidad completa para el análisis post-operativo y el cumplimiento de requisitos de transparencia.
-* **Aislamiento de Sesiones:** La plataforma gestiona estados de sesión volátiles, forzando la re-autenticación y el cierre seguro de sockets en caso de reinicios o pérdida de foco de la aplicación.
+Desarrollado como **Trabajo de Fin de Grado en Ingeniería Telemática**, este proyecto aborda desafíos críticos en la ingeniería de software distribuido, manejo de concurrencia asíncrona (patrón *Bulk Session*) y sistemas de baja latencia.
 
 ---
 
-## 📌 Documentación Adjunta y Directrices de Desarrollo
+## 🚀 Prerrequisitos
 
-El punto de entrada principal del sistema es `app_web.py` (ejecutado vía `streamlit run app_web.py`). 
+Para ejecutar este proyecto, necesitas:
 
-**Nota obligatoria para IAs de Programación y Desarrolladores:** Al realizar modificaciones en el código, respete siempre la arquitectura de separación de capas (MVC) y asegúrese de que cualquier nueva funcionalidad de red se implemente de forma asíncrona. 
-* Consulte **`ARCHITECTURE.md`** para conocer las restricciones estrictas del código y del entorno Streamlit.
-* Consulte **`TODO.md`** para el seguimiento de bugs activos y próximos hitos.
+1. **Python 3.11+**
+2. **Interactive Brokers (IBKR) Gateway o TWS** activo y configurado para aceptar conexiones API.
+   - Puerto de conexión: `4002` (Paper Trading).
+   - *Activar la opción "Enable ActiveX and Socket Clients" en los ajustes de la API.*
+
+---
+
+## ⚙️ Instalación y Configuración
+
+1. **Clonar el repositorio y preparar el entorno virtual:**
+   ```bash
+   git clone <URL_DEL_REPOSITORIO>
+   cd TFG_Opciones
+   python -m venv .venv
+   
+   # Windows
+   .venv\Scripts\activate
+   # macOS/Linux
+   source .venv/bin/activate
+   ```
+
+2. **Instalar las dependencias de ejecución:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Configurar las variables de entorno:**
+   Copia el archivo de ejemplo y asegúrate de que los parámetros de conexión son correctos.
+   ```bash
+   cp .env.example .env
+   ```
+
+---
+
+## 🏃‍♂️ Ejecución
+
+El proyecto utiliza **Streamlit** como frontend reactivo. Para levantar la aplicación:
+
+```bash
+streamlit run app_web.py
+```
+
+### 🔐 Credenciales de Acceso
+El sistema incorpora control de acceso mediante hashing SHA-256. 
+- **Usuario:** `admin`
+- **Contraseña:** `admin2026`
+
+---
+
+## 📐 Reglas Operativas (Importante)
+
+Debido a las restricciones de la API de IBKR y a la estructura del mercado de opciones, debes respetar las siguientes reglas al operar en el simulador:
+
+- **Activos Soportados:** Principalmente diseñado para operar sobre el índice **SPX**.
+- **Strikes (Precios de Ejercicio):** Los strikes introducidos deben ser **múltiplos exactos de 100** (ej. 5300, 5400). Los incrementos de 50 puntos (ej. 5350) no están soportados de forma generalizada en los históricos simulados.
+- **Vencimientos:** Es obligatorio utilizar vencimientos semanales (**SPXW**), preferiblemente con strikes en un rango de ±200-300 puntos respecto al precio *spot* actual para asegurar liquidez simulada.
+
+---
+
+## 🛠️ Stack Tecnológico
+
+- **Frontend:** Streamlit (Arquitectura Flat MVC)
+- **Red / Concurrencia:** `ib_insync`, `asyncio`, `nest_asyncio` (diseño *Bulk Session* con micro-sesiones efímeras)
+- **Motor Financiero:** `pandas`, `numpy`, `scipy` (Filtros Algorítmicos SMA, Black-Scholes y Greeks)
+- **Persistencia:** `sqlite3` (Audit Trail Inmutable)
+- **Seguridad:** `hashlib` (SHA-256)
+
+---
+
+## 🧪 Testing y CI
+
+Para ejecutar la batería de pruebas localmente (no requiere conexión a IBKR, inyecta objetos Mock):
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/ -v
+```
+El repositorio cuenta con integración continua (GitHub Actions) que automatiza estas pruebas en cada commit.
+
+---
+
+*Proyecto académico — Universidad 2025/2026.*

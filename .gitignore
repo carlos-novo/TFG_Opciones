@@ -1,0 +1,21 @@
+# Entornos virtuales
+.venv/
+env/
+venv/
+.agent.md
+
+# Cache de Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Configuración local de variables de entorno
+.env
+
+# ==============================================================
+# EXCEPCIONES IMPORTANTES
+# ==============================================================
+# La base de datos SQLite se mantiene versionada intencionadamente 
+# como parte del registro de auditoría (Audit Trail) para la 
+# evaluación académica del Trabajo de Fin de Grado.
+!tfg_trading.db

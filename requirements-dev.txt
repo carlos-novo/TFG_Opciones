@@ -1,0 +1,11 @@
+# =============================================================================
+# requirements-dev.txt — Dependencias de desarrollo y testing
+# =============================================================================
+# Incluye todo lo de runtime + herramientas de test.
+# Uso: pip install -r requirements-dev.txt
+# =============================================================================
+
+-r requirements.txt
+
+# --- Testing ---
+pytest

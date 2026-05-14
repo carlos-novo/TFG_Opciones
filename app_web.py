@@ -308,6 +308,37 @@ with tabs[0]:
         col2.metric("Buying Power", "---")
         col3.metric("P&L Diario", "---")
 
+    # --- PANEL DE POSICIONES ABIERTAS ---
+    st.divider()
+    st.subheader("📂 Posiciones Abiertas en Cartera")
+    st.write("Muestra los contratos actualmente en la cuenta Paper Trading (opciones, acciones, etc.).")
+
+    # Inicializamos el cache de posiciones en session_state para no consultar en cada rerun
+    if 'posiciones_cartera' not in st.session_state:
+        st.session_state['posiciones_cartera'] = None
+
+    if st.button("🔄 Actualizar Posiciones", key="btn_actualizar_cartera"):
+        if not conectado:
+            st.warning("⚠️ Debes estar conectado al bróker para consultar la cartera.")
+        else:
+            with st.spinner("Consultando posiciones en IBKR..."):
+                st.session_state['posiciones_cartera'] = st.session_state.broker.obtener_posiciones_cartera()
+
+    posiciones = st.session_state.get('posiciones_cartera')
+
+    if posiciones is None:
+        st.info("Pulsa 'Actualizar Posiciones' para cargar los datos del bróker.")
+    elif len(posiciones) == 0:
+        st.success("✅ Sin posiciones abiertas en la cuenta. La cartera está en efectivo.")
+    else:
+        import pandas as pd
+        df_posiciones = pd.DataFrame(posiciones)
+        st.dataframe(
+            df_posiciones,
+            use_container_width=True,
+            hide_index=True
+        )
+
 with tabs[2]:
     st.header("📊 Consola de Monitorización y Auditoría")
     st.write("Historial de actividad y decisiones del motor algorítmico.")
@@ -395,5 +426,54 @@ with tabs[2]:
             },
             hide_index=True
         )
+
+        # --- BLOQUE DE CANCELACIÓN DE ORDEN ---
+        st.divider()
+        st.subheader("❌ Cancelar Orden Abierta")
+        st.write(
+            "Introduce el **OrderId** de una orden en estado `Submitted` para solicitar su cancelación al bróker. "
+            "Solo tienen efecto las órdenes que aún no han sido ejecutadas."
+        )
+
+        # Inicializamos el estado del flujo de confirmación de cancelación
+        if 'cancelacion_pendiente' not in st.session_state:
+            st.session_state['cancelacion_pendiente'] = None
+
+        col_cancel_input, col_cancel_btn = st.columns([2, 1])
+        order_id_a_cancelar = col_cancel_input.number_input(
+            "OrderId a cancelar", min_value=1, step=1, value=1, key="input_cancel_id"
+        )
+        if col_cancel_btn.button("🗑️ Solicitar Cancelación", key="btn_solicitar_cancelacion"):
+            if not conectado:
+                st.warning("⚠️ Debes estar conectado al bróker para cancelar órdenes.")
+            else:
+                # Guardamos en session_state para sobrevivir al rerun (patrón idéntico al de ejecución)
+                st.session_state['cancelacion_pendiente'] = int(order_id_a_cancelar)
+                st.rerun()
+
+        # Bloque de confirmación — solo aparece cuando hay una cancelación pendiente de validar
+        if st.session_state.get('cancelacion_pendiente') is not None:
+            oid = st.session_state['cancelacion_pendiente']
+            st.warning(
+                f"⚠️ ZONA DE CANCELACIÓN — Vas a solicitar la cancelación de la orden "
+                f"**#{oid}** en el bróker. Esta acción es irreversible si la orden está activa."
+            )
+            col_conf, col_abort = st.columns(2)
+            if col_conf.button("✅ CONFIRMAR CANCELACIÓN", type="primary", key="btn_confirmar_cancel"):
+                with st.status("📡 Enviando cancelación al Gateway IBKR...", expanded=True) as status_cancel:
+                    resultado_cancel = st.session_state.broker.cancelar_orden(oid)
+                    if resultado_cancel['exito']:
+                        status_cancel.update(label=f"✅ Cancelación enviada — Orden #{oid}", state="complete")
+                        st.success(resultado_cancel['mensaje'])
+                        db.registrar_evento("ORDEN_CANCELADA", f"OrderId:{oid} | Solicitud de cancelación emitida.")
+                    else:
+                        status_cancel.update(label="⚠️ No se pudo cancelar", state="error")
+                        st.error(resultado_cancel['mensaje'])
+                st.session_state['cancelacion_pendiente'] = None
+                st.rerun()
+            if col_abort.button("✖️ Abortar", key="btn_abort_cancel"):
+                st.session_state['cancelacion_pendiente'] = None
+                st.rerun()
+
     else:
         st.info("📦 Aún no se han ejecutado órdenes en esta sesión. Las órdenes BAG enviadas al bróker aparecerán aquí.")

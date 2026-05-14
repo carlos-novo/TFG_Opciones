@@ -329,3 +329,115 @@ class GestorIBKR:
             if ib_temp.isConnected():
                 ib_temp.disconnect()
             raise  # Re-lanzamos para que la UI muestre el mensaje
+
+    def obtener_posiciones_cartera(self):
+        """
+        Micro-sesión Read-Only: Abre una conexión efímera, solicita el portfolio
+        actual de la cuenta Paper Trading y devuelve una lista de diccionarios
+        listos para ser consumidos por un st.dataframe().
+
+        Retorna:
+            list[dict] con claves: simbolo, tipo, vencimiento, strike, right,
+                                   posicion, precio_medio, valor_mercado, pnl_no_realizado
+            [] si no hay posiciones o hay error de conexión.
+        """
+        self._asegurar_event_loop()
+        ib_temp = IB()
+        try:
+            # clientId=94 reservado exclusivamente para consultas de cartera
+            ib_temp.connect(self.host, self.port, clientId=94)
+
+            items = ib_temp.portfolio()  # Lista de PortfolioItem
+            posiciones = []
+
+            for item in items:
+                c = item.contract
+                # Distinguimos Opciones de Stocks/Índices para mostrar la info relevante
+                if c.secType == 'OPT':
+                    posiciones.append({
+                        "Símbolo":       c.symbol,
+                        "Tipo":          "Opción",
+                        "Vencimiento":   c.lastTradeDateOrContractMonth,
+                        "Strike":        c.strike,
+                        "Right (C/P)":   c.right,
+                        "Posición":      item.position,
+                        "Precio Medio":  round(item.averageCost, 4),
+                        "Valor Mercado": round(item.marketValue, 2),
+                        "P&L No Real.":  round(item.unrealizedPNL, 2),
+                    })
+                else:
+                    posiciones.append({
+                        "Símbolo":       c.symbol,
+                        "Tipo":          c.secType,
+                        "Vencimiento":   "—",
+                        "Strike":        "—",
+                        "Right (C/P)":   "—",
+                        "Posición":      item.position,
+                        "Precio Medio":  round(item.averageCost, 4),
+                        "Valor Mercado": round(item.marketValue, 2),
+                        "P&L No Real.":  round(item.unrealizedPNL, 2),
+                    })
+
+            ib_temp.disconnect()
+            return posiciones
+
+        except Exception as e:
+            print(f"Error al obtener posiciones de cartera: {e}")
+            if ib_temp.isConnected():
+                ib_temp.disconnect()
+            return []
+
+    def cancelar_orden(self, order_id):
+        """
+        Micro-sesión de cancelación: Abre una conexión efímera, localiza la orden
+        por su orderId entre las órdenes abiertas y emite la solicitud de cancelación.
+
+        Args:
+            order_id (int): El orderId de la orden a cancelar (capturado al enviarla).
+
+        Retorna:
+            dict con claves 'exito' (bool) y 'mensaje' (str) describiendo el resultado.
+        """
+        self._asegurar_event_loop()
+        ib_temp = IB()
+        try:
+            # clientId=93 reservado para operaciones de cancelación
+            ib_temp.connect(self.host, self.port, clientId=93)
+
+            # Solicitamos las órdenes abiertas actuales en el Gateway
+            ordenes_abiertas = ib_temp.reqOpenOrders()
+            ib_temp.sleep(1)  # Pausa para que el Gateway responda el listado
+
+            # Buscamos la orden específica por su ID
+            orden_objetivo = None
+            for trade in ordenes_abiertas:
+                if trade.order.orderId == order_id:
+                    orden_objetivo = trade
+                    break
+
+            if orden_objetivo is None:
+                ib_temp.disconnect()
+                return {
+                    "exito": False,
+                    "mensaje": f"Orden #{order_id} no encontrada entre las órdenes abiertas. "
+                               "Puede que ya esté ejecutada o cancelada."
+                }
+
+            # Emitimos la cancelación — IBKR procesará el ACK de forma asíncrona
+            ib_temp.cancelOrder(orden_objetivo.order)
+            ib_temp.sleep(1)  # Pausa para que el Gateway confirme el intento
+
+            ib_temp.disconnect()
+            return {
+                "exito": True,
+                "mensaje": f"Solicitud de cancelación enviada correctamente para la orden #{order_id}."
+            }
+
+        except Exception as e:
+            print(f"Error al cancelar orden #{order_id}: {e}")
+            if ib_temp.isConnected():
+                ib_temp.disconnect()
+            return {
+                "exito": False,
+                "mensaje": f"Error técnico al intentar cancelar la orden #{order_id}: {e}"
+            }

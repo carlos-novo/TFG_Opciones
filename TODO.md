@@ -1,8 +1,9 @@
-# 📋 ESTADO DEL PROYECTO Y HOJA DE RUTA (`TODO.md`)
+# 📋 REGISTRO HISTÓRICO DEL PROYECTO (`TODO.md`)
 
-**Última actualización:** 07/05/2026 — 13:01 (commit final pre-entrega)
+**Última actualización:** 14/05/2026
 
-Este documento registra el progreso actual del TFG, los errores críticos que requieren atención inmediata y la planificación de las próximas fases de desarrollo.
+> ⚠️ Este documento es un **registro histórico de referencia** para la redacción de la memoria.
+> El plan de acción activo está en `NUEVA_HOJA_RUTA.md`.
 
 ---
 
@@ -63,18 +64,11 @@ Este documento registra el progreso actual del TFG, los errores críticos que re
 
 ---
 
-## 🚀 3. ROADMAP POST-TFG (Mejoras Futuras)
-
-- [x] ~~Empaquetado, Middleware, Gestión, UI y Registro~~ → Todos completados ↑
-- ✅ **FASE 4 COMPLETADA AL 100%**
-
-### Mejoras Identificadas para Versión Futura
-- [ ] 🔄 **Seguimiento de Estado de Orden (Polling):** Implementar un mecanismo de consulta periódica del estado de la orden tras su envío (`ib.reqOpenOrders()` o suscripción a eventos `Trade`). Actualizar el campo `status` en la tabla `operaciones` cuando la orden pase de `Submitted` a `Filled`, `PartiallyFilled` o `Cancelled`. Requiere gestión de callbacks asíncronos en el patrón de micro-sesión.
-- [ ] 📊 **Panel de Posiciones Abiertas:** Mostrar las opciones en cartera en tiempo real mediante `ib.portfolio()` en la pestaña de Dashboard.
-- [ ] ❌ **Función de Cancelación de Orden:** Añadir `ib.cancelOrder(orderId)` con confirmación en la UI para órdenes en estado `Submitted`.
-
----
-
-## 🛠️ Notas de Mantenimiento
+## 🛠️ Notas de Mantenimiento y Reglas Operativas
 - Revisar logs de la terminal ante cualquier error `200: No security definition found`.
-- Mantener el archivo `tfg_trading.db` en el mismo nivel que los scripts para evitar redundancias.
+- Mantener el archivo `tfg_trading.db` en el mismo nivel que los scripts.
+- Los strikes de SPX/SPXW deben ser **múltiplos exactos de 100** (ej. 5300, 5400). Los de 50 pts (ej. 5350) no están listados en IBKR.
+- Usar **vencimientos semanales SPXW** con strikes en rango ±200-300 pts del spot actual.
+- `clientId` reservados por micro-sesión: 93 (cancelar), 94 (cartera), 95 (orden), 96 (estrategia bulk), 97 (histórico), 99 (precio).
+
+> 📌 **Limitación documentada:** El campo `status` en `operaciones` captura el estado inicial (`Submitted`). El polling post-orden queda fuera del alcance del TFG (ver sección Trabajo Futuro en `NUEVA_HOJA_RUTA.md`).
