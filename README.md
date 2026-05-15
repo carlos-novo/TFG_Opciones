@@ -48,9 +48,25 @@ Para ejecutar este proyecto, necesitas:
 
 ## 🏃‍♂️ Ejecución
 
-El proyecto utiliza **Streamlit** como frontend reactivo. Para levantar la aplicación:
+El proyecto puede ser ejecutado localmente de dos formas.
+
+### Opción A: Contenedores Docker (Recomendado)
+Para una ejecución instantánea y aislada sin necesidad de instalar Python, usando Docker Desktop:
+```bash
+docker-compose up --build
+```
+Esto levantará:
+- **API REST (FastAPI):** `http://localhost:8000/docs`
+- **Interfaz (Streamlit):** `http://localhost:8501`
+
+### Opción B: Ejecución Manual en Entorno Virtual
+Si prefieres no usar Docker, puedes levantar los componentes de forma independiente:
 
 ```bash
+# Terminal 1: Arrancar la API REST (Backend)
+uvicorn api_rest:app --host 0.0.0.0 --port 8000
+
+# Terminal 2: Arrancar la interfaz gráfica (Frontend)
 streamlit run app_web.py
 ```
 
@@ -68,6 +84,8 @@ Debido a las restricciones de la API de IBKR y a la estructura del mercado de op
 - **Activos Soportados:** Principalmente diseñado para operar sobre el índice **SPX**.
 - **Strikes (Precios de Ejercicio):** Los strikes introducidos deben ser **múltiplos exactos de 100** (ej. 5300, 5400). Los incrementos de 50 puntos (ej. 5350) no están soportados de forma generalizada en los históricos simulados.
 - **Vencimientos:** Es obligatorio utilizar vencimientos semanales (**SPXW**), preferiblemente con strikes en un rango de ±200-300 puntos respecto al precio *spot* actual para asegurar liquidez simulada.
+
+> 🛡️ **Modo Defensa TFG (Mock API):** Si durante la demostración el mercado está cerrado, o la cadena de opciones carece de liquidez y devuelve un error `No security definition`, el sistema activará automáticamente un modo "Fallback" (Modo Defensa TFG). Desconectará el Gateway limpiamente, simulará una ejecución exitosa de la orden Iron Condor y asignará un `order_id` ficticio para asegurar que la demostración gráfica y visual continúe de forma ininterrumpida frente al tribunal.
 
 ---
 
