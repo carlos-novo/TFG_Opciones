@@ -404,8 +404,8 @@ class GestorIBKR:
             # clientId=93 reservado para operaciones de cancelación
             ib_temp.connect(self.host, self.port, clientId=93)
 
-            # Solicitamos las órdenes abiertas actuales en el Gateway
-            ordenes_abiertas = ib_temp.reqOpenOrders()
+            # Solicitamos todas las órdenes abiertas actuales en el Gateway (de todos los clientes)
+            ordenes_abiertas = ib_temp.reqAllOpenOrders()
             ib_temp.sleep(1)  # Pausa para que el Gateway responda el listado
 
             # Buscamos la orden específica por su ID
@@ -455,8 +455,8 @@ class GestorIBKR:
             # clientId=92 para polling en background
             ib_temp.connect(self.host, self.port, clientId=92)
             
-            # Pedimos open orders
-            open_orders = ib_temp.reqOpenOrders()
+            # Pedimos open orders de TODOS los clientes
+            open_orders = ib_temp.reqAllOpenOrders()
             for trade in open_orders:
                 estados[trade.order.orderId] = trade.orderStatus.status
                 

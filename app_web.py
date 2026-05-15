@@ -35,6 +35,10 @@ def iniciar_hilo_polling():
                                 if nuevo_estado != estado_anterior:
                                     db_poll.actualizar_estado_orden(oid, nuevo_estado)
                                     db_poll.registrar_evento('POLLING_ACTUALIZACION', f"Orden #{oid}: {estado_anterior} -> {nuevo_estado}")
+                            else:
+                                # Si no está en OpenOrders ni en Executions, IBKR la ha destruido (ej. rechazo instantáneo)
+                                db_poll.actualizar_estado_orden(oid, 'Cancelled')
+                                db_poll.registrar_evento('POLLING_ACTUALIZACION', f"Orden #{oid}: {estado_anterior} -> Cancelled (Purgada por IBKR)")
             except Exception as e:
                 print(f"Hilo de polling: Error -> {e}")
             
