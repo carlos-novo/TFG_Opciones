@@ -8,8 +8,10 @@
 #   pip install -r requirements-dev.txt      (runtime + tests)
 # =============================================================================
 
-# --- Interfaz web ---
+# --- Interfaz web y API REST ---
 streamlit==1.54.0
+fastapi==0.136.1
+uvicorn==0.47.0
 
 # --- Conectividad Interactive Brokers ---
 ib-insync==0.9.86
