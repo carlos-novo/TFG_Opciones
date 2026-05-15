@@ -434,13 +434,18 @@ with tabs[1]:
                     )
                     
                     st.rerun()
+                except ValueError as ve:
+                    # Error de validación de negocio (ej. strikes no existen)
+                    status_ord.update(label="❌ Error de Validación de Contratos", state="error")
+                    st.error(f"Error de mercado: {ve}")
+                    enviar_alerta_webhook("⚠️ Error de Contratos", str(ve), "warning")
                 except Exception as e:
-                    # Encolar en caso de fallo
+                    # Error técnico (caída del servidor o red)
                     db.encolar_reintento(ev['ticker'], ev['vencimiento'], ev['strikes'], ev['credito_real'])
-                    db.registrar_evento("ORDEN_ENCOLADA", f"Fallo al enviar {ev['ticker']}. Añadida a cola de reintentos por caída del Gateway.")
+                    db.registrar_evento("ORDEN_ENCOLADA", f"Fallo al enviar {ev['ticker']}. Añadida a cola de reintentos por caída del Gateway. Error: {e}")
                     status_ord.update(label="⚠️ Servidor caído. Orden encolada", state="error")
-                    st.error("El servidor de IBKR parece estar caído. La orden ha sido guardada en la cola de reintentos y se enviará automáticamente (Watchdog) cuando vuelva la conexión.")
-                    enviar_alerta_webhook("⚠️ Caída del servidor (Watchdog Activo)", f"La orden de **{ev['ticker']}** no se pudo enviar porque el Gateway IBKR no responde. Se ha metido en la cola de reintentos.", "warning")
+                    st.error("El servidor de IBKR parece estar caído o hubo un error técnico. La orden ha sido guardada en la cola de reintentos.")
+                    enviar_alerta_webhook("⚠️ Caída del servidor (Watchdog Activo)", f"La orden de **{ev['ticker']}** no se pudo enviar por error técnico. Se ha metido en la cola de reintentos. Detalles: {e}", "warning")
                     
         # --- BLOQUE DE ANÁLISIS DE SENSIBILIDAD B-S ---
         # --- BLOQUE DE ANÁLISIS DE SENSIBILIDAD B-S ---
