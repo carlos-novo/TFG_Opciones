@@ -363,6 +363,8 @@ Crear carpeta `figures/` con los siguientes archivos:
 ### 📅 Día 22 (23 Mayo) — Feature Freeze Absoluto v3.0
 - [x] `git tag v3.0-tfg-dios`
 - [x] Validación end-to-end de todos los contenedores y de la seguridad de la API.
+- [x] **Mejora Pre-Defensa**: Añadido gráfico interactivo de **Payoff 2D (Tienda de Campaña)** en el frontend para análisis visual de la rentabilidad a vencimiento.
+- [x] **Mejora Pre-Defensa**: Añadido modo **Mock Defensa TFG (Fallback)** en la conexión IBKR para asegurar el flujo de la demostración visual en caso de inactividad de mercado real o rechazo de contratos.
 
 ## PARTE 4 — CALENDARIO SEMANAS 3–5 (Memoria LaTeX)
 
