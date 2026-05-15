@@ -343,9 +343,9 @@ Crear carpeta `figures/` con los siguientes archivos:
 > **Objetivo Académico:** Aprovechando que la Fase 2 se completó de manera fugaz el 15 de Mayo, emplearemos los últimos 7 días antes de la redacción para añadir 4 disciplinas clave de la Ingeniería Informática y Telemática: Ciberseguridad, Data Science, QA y DevOps.
 
 ### 📅 Día 15-16 (16-17 Mayo) — Ciberseguridad: Autenticación JWT en API REST
-- [ ] Implementar seguridad basada en tokens (JSON Web Tokens) en FastAPI.
-- [ ] Bloquear rutas `/operaciones` y `/auditoria` para requerir cabecera `Authorization: Bearer <token>`.
-- [ ] *Justificación académica:* Demuestra dominio de criptografía web, control de accesos y seguridad en APIs (OWASP).
+- [x] Implementar seguridad basada en tokens (JSON Web Tokens) en FastAPI.
+- [x] Bloquear rutas `/operaciones` y `/auditoria` para requerir cabecera `Authorization: Bearer <token>`.
+- [x] *Justificación académica:* Demuestra dominio de criptografía web, control de accesos y seguridad en APIs (OWASP).
 
 ### 📅 Día 17-18 (18-19 Mayo) — Data Science: Módulo de Backtesting Visual
 - [ ] Descargar histórico anual de precios de un subyacente y aplicar el algoritmo SMA retrospectivamente.

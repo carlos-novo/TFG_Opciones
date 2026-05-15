@@ -67,3 +67,9 @@ charset-normalizer==3.4.4
 idna==3.11
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
+
+# --- Ciberseguridad (Día 15: JWT) ---
+python-jose[cryptography]==3.5.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.28
+bcrypt==5.0.0
