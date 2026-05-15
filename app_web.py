@@ -96,6 +96,11 @@ def iniciar_hilo_watchdog():
                                 db_wd.registrar_operacion(res['order_id'], row['ticker'], v_date, strikes, row['credito'], metricas_dummy, res['status'])
                                 db_wd.marcar_reintento_procesado(row['id'], 'SENT')
                                 db_wd.registrar_evento("ORDEN_RECUPERADA", f"Orden encolada enviada al Gateway. OrderId: {res['order_id']}")
+                                enviar_alerta_webhook(
+                                    "🔄 Orden Recuperada por el Watchdog", 
+                                    f"El sistema ha recuperado la conexión y ha enviado con éxito la orden encolada de **{row['ticker']}**.\n**OrderId:** {res['order_id']}", 
+                                    "success"
+                                )
                             except Exception as e:
                                 intentos_act = db_wd.incrementar_intentos(row['id'])
                                 if intentos_act >= 3:
