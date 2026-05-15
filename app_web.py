@@ -690,7 +690,7 @@ with tabs[3]:
                 df_bt = ticker_obj.history(period="1y")
                 
                 if df_bt.empty:
-                    st.error(f"No se encontraron datos históricos para {ticker_bt}.")
+                    st.error(f"No se encontraron datos históricos para {ticker_bt}. Yahoo Finance podría estar limitando las peticiones.")
                 else:
                     # Garantizar compatibilidad con yfinance multi-index (versiones recientes)
                     if isinstance(df_bt.columns, pd.MultiIndex):
@@ -755,7 +755,7 @@ with tabs[3]:
                         margin=dict(l=0, r=0, t=50, b=0)
                     )
                     
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width='stretch', config={'scrollZoom': True})
                     
                     # 6. Dashboard Analítico
                     st.subheader("📊 Métricas de la Simulación")
@@ -773,3 +773,4 @@ with tabs[3]:
                     
             except Exception as e:
                 st.error(f"Error interno durante la simulación: {e}")
+
