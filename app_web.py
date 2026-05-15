@@ -158,10 +158,9 @@ if not st.session_state['autenticado']:
             if submit_login:
                 if verificar_credenciales(user_input, pass_input):
                     st.session_state['autenticado'] = True
-                    st.rerun() # Fuerza la recarga para pasar la barrera
                     # --- REGISTRO EN BD ---
                     db.registrar_evento("LOGIN_EXITOSO", f"Usuario '{user_input}' ha accedido al sistema.")
-                    st.rerun()
+                    st.rerun() # Fuerza la recarga para pasar la barrera
                 else:
                     st.error("Credenciales incorrectas. Acceso denegado.")
     
