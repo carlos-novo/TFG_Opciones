@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from base_datos import GestorBaseDatos
 import json
 
@@ -10,6 +10,11 @@ app = FastAPI(
 )
 
 db = GestorBaseDatos()
+
+@app.get("/", include_in_schema=False)
+def raiz():
+    """Redirige automáticamente la raíz a la página de documentación."""
+    return RedirectResponse(url="/docs")
 
 @app.get("/health", summary="Comprobar estado del servidor")
 def health_check():
