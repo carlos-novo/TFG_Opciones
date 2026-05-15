@@ -73,3 +73,8 @@ python-jose[cryptography]==3.5.0
 passlib[bcrypt]==1.7.4
 python-multipart==0.0.28
 bcrypt==5.0.0
+
+# --- Data Science y Backtesting (Día 17: Visualización) ---
+yfinance==0.2.37
+plotly==5.20.0
+

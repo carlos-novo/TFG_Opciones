@@ -348,9 +348,9 @@ Crear carpeta `figures/` con los siguientes archivos:
 - [x] *Justificación académica:* Demuestra dominio de criptografía web, control de accesos y seguridad en APIs (OWASP).
 
 ### 📅 Día 17-18 (18-19 Mayo) — Data Science: Módulo de Backtesting Visual
-- [ ] Descargar histórico anual de precios de un subyacente y aplicar el algoritmo SMA retrospectivamente.
-- [ ] Usar `plotly` para dibujar en Streamlit un gráfico interactivo con la curva de precios, la SMA y marcadores verdes/rojos de compra/bloqueo.
-- [ ] *Justificación académica:* Dota al proyecto de una dimensión de Big Data y Análisis Cuantitativo imprescindible en finanzas e IA.
+- [x] Descargar histórico anual de precios de un subyacente y aplicar el algoritmo SMA retrospectivamente.
+- [x] Usar `plotly` para dibujar en Streamlit un gráfico interactivo con la curva de precios, la SMA y marcadores verdes/rojos de compra/bloqueo.
+- [x] *Justificación académica:* Dota al proyecto de una dimensión de Big Data y Análisis Cuantitativo imprescindible en finanzas e IA.
 
 ### 📅 Día 19-20 (20-21 Mayo) — Calidad del Software (QA): Tests Unitarios y CI
 - [ ] Programar suite de tests en `tests/` con `pytest` para verificar matemáticamente las Griegas y la lógica del Watchdog.

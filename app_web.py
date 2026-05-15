@@ -227,7 +227,7 @@ if st.sidebar.button("Probar Datos de Mercado"):
 # --- ÁREA PRINCIPAL ---
 st.title("Panel de Control - Algorítmico de Opciones")
 
-tabs = st.tabs(["📊 Dashboard", "⚙️ Nueva Estrategia", "📈 Monitorización"])
+tabs = st.tabs(["📊 Dashboard", "⚙️ Nueva Estrategia", "📈 Monitorización", "🧪 Backtest Visual"])
 
 with tabs[1]:
     st.header("Definición de Estrategia: Iron Condor")
@@ -668,3 +668,108 @@ with tabs[2]:
 
     else:
         st.info("📦 Aún no se han ejecutado órdenes en esta sesión. Las órdenes BAG enviadas al bróker aparecerán aquí.")
+
+with tabs[3]:
+    st.header("🧪 Backtesting Visual (Data Science)")
+    st.write("Simulación retrospectiva del algoritmo SMA sobre el histórico anual del subyacente. Permite validar visualmente las reglas de entrada antes de operar en tiempo real.")
+    
+    col_bt1, col_bt2, col_bt3 = st.columns(3)
+    ticker_bt = col_bt1.text_input("Ticker para simulación", value="SPY", key="ticker_bt").upper()
+    periodo_bt = col_bt2.number_input("Periodo SMA", min_value=10, max_value=300, value=200, step=10, key="periodo_bt")
+    regla_bt = col_bt3.selectbox("Regla de Trading", ["Precio > SMA", "Precio < SMA"], key="regla_bt")
+    
+    if st.button("Ejecutar Backtest Anual", key="btn_run_backtest"):
+        with st.spinner(f"Descargando datos anuales de {ticker_bt} y simulando el motor..."):
+            import yfinance as yf
+            import plotly.graph_objects as go
+            import pandas as pd
+            
+            try:
+                # 1. Descarga de datos masiva
+                ticker_obj = yf.Ticker(ticker_bt)
+                df_bt = ticker_obj.history(period="1y")
+                
+                if df_bt.empty:
+                    st.error(f"No se encontraron datos históricos para {ticker_bt}.")
+                else:
+                    # Garantizar compatibilidad con yfinance multi-index (versiones recientes)
+                    if isinstance(df_bt.columns, pd.MultiIndex):
+                        close_col = df_bt['Close'].iloc[:, 0]
+                    else:
+                        close_col = df_bt['Close']
+                        
+                    # 2. Vectorización matemática (Análisis Cuantitativo)
+                    df_res = pd.DataFrame(index=df_bt.index)
+                    df_res['Close'] = close_col
+                    df_res['SMA'] = df_res['Close'].rolling(window=periodo_bt).mean()
+                    
+                    # 3. Vectorización de la regla lógica (Filtro Algorítmico)
+                    if regla_bt == "Precio > SMA":
+                        df_res['Autorizado'] = df_res['Close'] > df_res['SMA']
+                    else:
+                        df_res['Autorizado'] = df_res['Close'] < df_res['SMA']
+                        
+                    # 4. Cálculo de transiciones de estado (Derivada discreta)
+                    df_res['Cruce'] = df_res['Autorizado'].astype(int).diff()
+                    
+                    puntos_verdes = df_res[df_res['Cruce'] == 1]
+                    puntos_rojos = df_res[df_res['Cruce'] == -1]
+                    
+                    # 5. Generación del gráfico interactivo (Data Visualization)
+                    fig = go.Figure()
+                    
+                    # Línea de Precio
+                    fig.add_trace(go.Scatter(
+                        x=df_res.index, y=df_res['Close'],
+                        mode='lines', name='Precio (Close)',
+                        line=dict(color='#2E86C1', width=2)
+                    ))
+                    
+                    # Línea SMA
+                    fig.add_trace(go.Scatter(
+                        x=df_res.index, y=df_res['SMA'],
+                        mode='lines', name=f'SMA {periodo_bt}',
+                        line=dict(color='#F39C12', width=2, dash='dash')
+                    ))
+                    
+                    # Marcadores de Acción
+                    fig.add_trace(go.Scatter(
+                        x=puntos_verdes.index, y=puntos_verdes['Close'],
+                        mode='markers', name='Filtro OK (Entrar)',
+                        marker=dict(color='green', size=12, symbol='triangle-up', line=dict(width=1, color='DarkSlateGrey'))
+                    ))
+                    
+                    fig.add_trace(go.Scatter(
+                        x=puntos_rojos.index, y=puntos_rojos['Close'],
+                        mode='markers', name='Filtro Bloqueado (No Entrar)',
+                        marker=dict(color='red', size=12, symbol='triangle-down', line=dict(width=1, color='DarkSlateGrey'))
+                    ))
+                    
+                    fig.update_layout(
+                        title=f'Backtest Visual - Dinámica de Autorización para {ticker_bt} (Último Año)',
+                        xaxis_title='Fecha',
+                        yaxis_title='Precio USD',
+                        hovermode='x unified',
+                        template='plotly_white',
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                        margin=dict(l=0, r=0, t=50, b=0)
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # 6. Dashboard Analítico
+                    st.subheader("📊 Métricas de la Simulación")
+                    c1, c2, c3 = st.columns(3)
+                    
+                    # Eliminamos los NaNs iniciales producidos por el rolling() de la SMA
+                    df_clean = df_res.dropna()
+                    dias_totales = len(df_clean)
+                    dias_autorizados = df_clean['Autorizado'].sum()
+                    porcentaje_autorizado = (dias_autorizados / dias_totales) * 100 if dias_totales > 0 else 0
+                    
+                    c1.metric("Días Evaluados (post-SMA)", dias_totales)
+                    c2.metric("Días con Filtro Autorizado", dias_autorizados)
+                    c3.metric("Exposición Teórica al Mercado", f"{porcentaje_autorizado:.1f}%")
+                    
+            except Exception as e:
+                st.error(f"Error interno durante la simulación: {e}")
