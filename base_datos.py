@@ -130,6 +130,17 @@ class GestorBaseDatos:
         finally:
             conexion.close()
 
+    def incrementar_intentos(self, id_reintento):
+        """Suma 1 al contador de intentos. Devuelve el número actual."""
+        conexion = self._conectar()
+        cursor = conexion.cursor()
+        cursor.execute("UPDATE cola_reintentos SET intentos = intentos + 1 WHERE id = ?", (id_reintento,))
+        conexion.commit()
+        cursor.execute("SELECT intentos FROM cola_reintentos WHERE id = ?", (id_reintento,))
+        intentos = cursor.fetchone()[0]
+        conexion.close()
+        return intentos
+
     def marcar_reintento_procesado(self, id_reintento, status_final):
         """Actualiza el estado de un reintento a procesado (o fallido definitivo)."""
         conexion = self._conectar()

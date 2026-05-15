@@ -93,7 +93,12 @@ def iniciar_hilo_watchdog():
                                 db_wd.marcar_reintento_procesado(row['id'], 'SENT')
                                 db_wd.registrar_evento("ORDEN_RECUPERADA", f"Orden encolada enviada al Gateway. OrderId: {res['order_id']}")
                             except Exception as e:
-                                pass # Si falla, se queda en QUEUED y se reintenta en el siguiente ciclo
+                                intentos_act = db_wd.incrementar_intentos(row['id'])
+                                if intentos_act >= 3:
+                                    db_wd.marcar_reintento_procesado(row['id'], 'FAILED')
+                                    db_wd.registrar_evento("WATCHDOG_ERROR", f"Orden {row['ticker']} descartada (Poison Pill). Excedió 3 intentos.")
+                                else:
+                                    pass # Se reintenta en el siguiente ciclo
                 
                 estado_previo = estado_actual
             except Exception as e:
