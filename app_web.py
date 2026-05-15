@@ -74,8 +74,9 @@ def iniciar_hilo_watchdog():
                     db_wd.registrar_evento("WATCHDOG_ALERTA", "Pérdida de conexión TCP con IBKR Gateway (Puerto 4002)")
                 elif not estado_previo and estado_actual:
                     db_wd.registrar_evento("WATCHDOG_INFO", "Conexión TCP recuperada con IBKR Gateway")
-                    
-                    # 2. Procesar cola de reintentos (Capa 7)
+                
+                # 2. Procesar cola de reintentos SIEMPRE que haya conexión (Capa 7)
+                if estado_actual:
                     df_cola = db_wd.obtener_reintentos_pendientes()
                     if df_cola is not None and not df_cola.empty:
                         db_wd.registrar_evento("WATCHDOG_INFO", f"Procesando {len(df_cola)} órdenes en cola...")
@@ -92,7 +93,7 @@ def iniciar_hilo_watchdog():
                                 db_wd.marcar_reintento_procesado(row['id'], 'SENT')
                                 db_wd.registrar_evento("ORDEN_RECUPERADA", f"Orden encolada enviada al Gateway. OrderId: {res['order_id']}")
                             except Exception as e:
-                                print(f"Fallo en reintento: {e}")
+                                pass # Si falla, se queda en QUEUED y se reintenta en el siguiente ciclo
                 
                 estado_previo = estado_actual
             except Exception as e:
