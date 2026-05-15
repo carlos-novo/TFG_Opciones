@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends, status
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
+from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from base_datos import GestorBaseDatos
 from datetime import datetime, timedelta, timezone
@@ -62,10 +63,49 @@ async def obtener_usuario_actual(token: str = Depends(oauth2_scheme)):
 app = FastAPI(
     title="API REST TFG Opciones",
     description="Microservicio de monitorización para el sistema algorítmico de opciones.",
-    version="3.0.0"
+    version="3.0.0",
+    docs_url=None  # Desactivamos los docs por defecto para personalizarlos
 )
 
 db = GestorBaseDatos()
+
+@app.get("/docs", include_in_schema=False)
+async def custom_swagger_ui_html():
+    """Sobreescribimos la UI de Swagger para inyectar CSS personalizado y cambiar colores del candado."""
+    html_response = get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title=app.title + " - Swagger UI",
+        oauth2_redirect_url=app.swagger_ui_oauth2_redirect_url,
+        swagger_js_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js",
+        swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css",
+    )
+    
+    # Extraemos el HTML generado por FastAPI
+    html = html_response.body.decode("utf-8")
+    
+    # Inyectamos nuestro CSS personalizado para colorear el botón "Authorize"
+    custom_css = """
+    <style>
+    /* Candado abierto = Rojo */
+    .swagger-ui .btn.authorize.unlocked {
+        border-color: #d93a3a !important;
+        color: #d93a3a !important;
+    }
+    .swagger-ui .btn.authorize.unlocked svg {
+        fill: #d93a3a !important;
+    }
+    /* Candado cerrado = Verde */
+    .swagger-ui .btn.authorize.locked {
+        border-color: #4caf50 !important;
+        color: #4caf50 !important;
+    }
+    .swagger-ui .btn.authorize.locked svg {
+        fill: #4caf50 !important;
+    }
+    </style>
+    """
+    html = html.replace("</head>", f"{custom_css}</head>")
+    return HTMLResponse(html)
 
 @app.post("/token", summary="Obtener JWT para acceso")
 def login(form_data: OAuth2PasswordRequestForm = Depends()):
