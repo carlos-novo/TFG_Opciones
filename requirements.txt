@@ -78,3 +78,6 @@ bcrypt==5.0.0
 yfinance==0.2.37
 plotly==5.20.0
 
+# --- Calidad del Software y QA (Día 19: Tests Unitarios) ---
+pytest==8.2.0
+

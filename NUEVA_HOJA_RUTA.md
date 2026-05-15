@@ -353,8 +353,8 @@ Crear carpeta `figures/` con los siguientes archivos:
 - [x] *Justificación académica:* Dota al proyecto de una dimensión de Big Data y Análisis Cuantitativo imprescindible en finanzas e IA.
 
 ### 📅 Día 19-20 (20-21 Mayo) — Calidad del Software (QA): Tests Unitarios y CI
-- [ ] Programar suite de tests en `tests/` con `pytest` para verificar matemáticamente las Griegas y la lógica del Watchdog.
-- [ ] *Justificación académica:* Muestra madurez y rigurosidad en Ingeniería del Software (TDD / Pruebas automatizadas de backend).
+- [x] Programar suite de tests en `tests/` con `pytest` para verificar matemáticamente las Griegas y la lógica del Watchdog.
+- [x] *Justificación académica:* Muestra madurez y rigurosidad en Ingeniería del Software (TDD / Pruebas automatizadas de backend).
 
 ### 📅 Día 21 (22 Mayo) — DevOps: Contenedorización con Docker
 - [ ] Crear un `Dockerfile` optimizado y un `docker-compose.yml` para desplegar la UI y la API como contenedores orquestados.
