@@ -7,6 +7,7 @@ from conexion_ibkr import GestorIBKR
 from motor_logica import MotorEstrategias
 from base_datos import GestorBaseDatos
 from motor_bs import MotorBlackScholes
+from notificaciones import enviar_alerta_webhook
 import socket
 
 db = GestorBaseDatos()
@@ -36,6 +37,9 @@ def iniciar_hilo_polling():
                                 if nuevo_estado != estado_anterior:
                                     db_poll.actualizar_estado_orden(oid, nuevo_estado)
                                     db_poll.registrar_evento('POLLING_ACTUALIZACION', f"Orden #{oid}: {estado_anterior} -> {nuevo_estado}")
+                                    if nuevo_estado in ['Filled', 'Cancelled']:
+                                        color = "success" if nuevo_estado == 'Filled' else "warning"
+                                        enviar_alerta_webhook(f"Actualización de Orden #{oid}", f"Estado cambiado de {estado_anterior} a **{nuevo_estado}**", color)
                             else:
                                 # Si no está en OpenOrders ni en Executions, IBKR la ha destruido (ej. rechazo instantáneo)
                                 db_poll.actualizar_estado_orden(oid, 'Cancelled')
@@ -97,6 +101,7 @@ def iniciar_hilo_watchdog():
                                 if intentos_act >= 3:
                                     db_wd.marcar_reintento_procesado(row['id'], 'FAILED')
                                     db_wd.registrar_evento("WATCHDOG_ERROR", f"Orden {row['ticker']} descartada (Poison Pill). Excedió 3 intentos.")
+                                    enviar_alerta_webhook("🚨 Alerta de Poison Pill", f"La orden encolada de **{row['ticker']}** ha sido descartada permanentemente tras 3 intentos fallidos de conexión con el bróker. Verifica los contratos.", "error")
                                 else:
                                     pass # Se reintenta en el siguiente ciclo
                 
@@ -409,6 +414,14 @@ with tabs[1]:
                         status     = res['status']
                     )
                     del st.session_state['estrategia_validada']
+                    
+                    # --- WEBHOOK DÍA 13 ---
+                    enviar_alerta_webhook(
+                        "✅ Nueva Orden Iron Condor Enviada", 
+                        f"**Ticker:** {ev['ticker']}\n**Crédito:** ${ev['credito_real']}\n**Riesgo Máx:** ${ev['metricas']['max_riesgo']}\n**OrderId:** {res['order_id']}", 
+                        "success"
+                    )
+                    
                     st.rerun()
                 except Exception as e:
                     # Encolar en caso de fallo
@@ -416,6 +429,7 @@ with tabs[1]:
                     db.registrar_evento("ORDEN_ENCOLADA", f"Fallo al enviar {ev['ticker']}. Añadida a cola de reintentos por caída del Gateway.")
                     status_ord.update(label="⚠️ Servidor caído. Orden encolada", state="error")
                     st.error("El servidor de IBKR parece estar caído. La orden ha sido guardada en la cola de reintentos y se enviará automáticamente (Watchdog) cuando vuelva la conexión.")
+                    enviar_alerta_webhook("⚠️ Caída del servidor (Watchdog Activo)", f"La orden de **{ev['ticker']}** no se pudo enviar porque el Gateway IBKR no responde. Se ha metido en la cola de reintentos.", "warning")
                     
         # --- BLOQUE DE ANÁLISIS DE SENSIBILIDAD B-S ---
         st.divider()
