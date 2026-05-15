@@ -443,16 +443,26 @@ with tabs[1]:
                     enviar_alerta_webhook("⚠️ Caída del servidor (Watchdog Activo)", f"La orden de **{ev['ticker']}** no se pudo enviar porque el Gateway IBKR no responde. Se ha metido en la cola de reintentos.", "warning")
                     
         # --- BLOQUE DE ANÁLISIS DE SENSIBILIDAD B-S ---
+        # --- BLOQUE DE ANÁLISIS DE SENSIBILIDAD B-S ---
         st.divider()
-        st.subheader("🔥 Análisis Cuantitativo B-S (Heatmap)")
-        st.write("Genera un mapa de calor para evaluar cómo varía el ratio B/R si desplazamos los strikes.")
-        if st.button("Generar Heatmap de Sensibilidad (B/R)"):
-            with st.spinner("Calculando malla Black-Scholes..."):
-                dias_venc = (ev['vencimiento'] - date.today()).days
-                fig = MotorBlackScholes.generar_heatmap_ic(
-                    ev['precio_actual'], ev['tasa_riesgo'], ev['volatilidad'], dias_venc, ev['strikes']
-                )
-                st.pyplot(fig)
+        st.subheader("🔥 Análisis Cuantitativo B-S (Heatmap y Payoff)")
+        st.write("Genera gráficos interactivos para evaluar el perfil de pagos de tu estrategia.")
+        col_btn1, col_btn2 = st.columns(2)
+        
+        with col_btn1:
+            if st.button("Generar Gráfico Payoff 2D"):
+                with st.spinner("Calculando perfil de pagos (Tienda de campaña)..."):
+                    fig_payoff = MotorBlackScholes.generar_payoff_ic(ev['strikes'], ev['credito_real'])
+                    st.pyplot(fig_payoff)
+
+        with col_btn2:
+            if st.button("Generar Heatmap de Sensibilidad (B/R)"):
+                with st.spinner("Calculando malla Black-Scholes..."):
+                    dias_venc = (ev['vencimiento'] - date.today()).days
+                    fig = MotorBlackScholes.generar_heatmap_ic(
+                        ev['precio_actual'], ev['tasa_riesgo'], ev['volatilidad'], dias_venc, ev['strikes']
+                    )
+                    st.pyplot(fig)
 
 with tabs[0]:
     st.header("Resumen de la Cuenta (Paper Trading)")

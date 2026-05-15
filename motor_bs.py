@@ -141,3 +141,62 @@ class MotorBlackScholes:
                 
         fig.tight_layout()
         return fig
+
+    @staticmethod
+    def generar_payoff_ic(strikes, credito_neto):
+        """
+        Genera el gráfico de Perfil de Pagos a Vencimiento (Payoff o Tienda de Campaña)
+        para la estrategia Iron Condor.
+        """
+        p_long, p_short, c_short, c_long = strikes
+        
+        # Rango de precios: desde un 20% por debajo del Put Long hasta un 20% por encima del Call Long
+        precio_min = p_long * 0.8
+        precio_max = c_long * 1.2
+        S = np.linspace(precio_min, precio_max, 500)
+        
+        # Payoff de cada pata individual a vencimiento
+        payoff_p_long = np.maximum(p_long - S, 0)         # Long Put: ganamos si S < strike
+        payoff_p_short = -np.maximum(p_short - S, 0)      # Short Put: perdemos si S < strike
+        payoff_c_short = -np.maximum(S - c_short, 0)      # Short Call: perdemos si S > strike
+        payoff_c_long = np.maximum(S - c_long, 0)         # Long Call: ganamos si S > strike
+        
+        # Payoff total = Suma de payoffs + prima neta inicial
+        payoff_total = payoff_p_long + payoff_p_short + payoff_c_short + payoff_c_long + credito_neto
+        
+        # Cálculo de los Break-Even Points (Puntos de equilibrio)
+        bep_inferior = p_short - credito_neto
+        bep_superior = c_short + credito_neto
+        
+        # Configuración visual elegante con matplotlib
+        plt.style.use('dark_background')
+        fig, ax = plt.subplots(figsize=(8, 4))
+        
+        # Dibujar línea de Payoff
+        ax.plot(S, payoff_total, color='white', linewidth=2, label="P&L Total")
+        
+        # Línea de rentabilidad Cero
+        ax.axhline(0, color='gray', linestyle='--', linewidth=1)
+        
+        # Relleno verde translúcido para la zona de ganancia
+        ax.fill_between(S, payoff_total, 0, where=(payoff_total > 0), facecolor='green', alpha=0.4, label='Zona de Ganancia')
+        # Relleno rojo translúcido para la zona de pérdida
+        ax.fill_between(S, payoff_total, 0, where=(payoff_total < 0), facecolor='red', alpha=0.4, label='Zona de Pérdida')
+        
+        # Marcadores de Break-Even
+        ax.axvline(bep_inferior, color='yellow', linestyle=':', linewidth=1)
+        ax.axvline(bep_superior, color='yellow', linestyle=':', linewidth=1)
+        
+        # Anotaciones
+        ax.text(bep_inferior, min(payoff_total)*0.2, f' BEP: {bep_inferior:.2f}', color='yellow', verticalalignment='top', horizontalalignment='right')
+        ax.text(bep_superior, min(payoff_total)*0.2, f' BEP: {bep_superior:.2f}', color='yellow', verticalalignment='top', horizontalalignment='left')
+        
+        ax.set_title("Perfil de Pagos a Vencimiento (Iron Condor)", pad=15)
+        ax.set_xlabel("Precio del Subyacente al Vencimiento")
+        ax.set_ylabel("P&L ($)")
+        ax.legend()
+        
+        fig.tight_layout()
+        # Restaurar estilo por si acaso Streamlit usa otro en otras gráficas
+        plt.style.use('default') 
+        return fig
