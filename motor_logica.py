@@ -1,5 +1,6 @@
 from datetime import date
 import pandas as pd
+import math
 
 class MotorEstrategias:
     """
@@ -18,6 +19,10 @@ class MotorEstrategias:
         ingreso = d_p_s['bid'] + d_c_s['bid']
         coste = d_p_l['ask'] + d_c_l['ask']
         credito_neto = ingreso - coste
+        
+        # FIX: Si no hay datos de mercado, Python suma NaNs y el límite de la orden peta
+        if math.isnan(credito_neto):
+            credito_neto = 0.0
         
         return {
             "credito_neto": round(credito_neto, 2),
