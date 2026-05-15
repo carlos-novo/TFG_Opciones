@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from base_datos import GestorBaseDatos
+import json
 
 app = FastAPI(
     title="API REST TFG Opciones",
@@ -21,8 +22,8 @@ def obtener_operaciones(limit: int = 50):
         if df is None or df.empty:
             return JSONResponse(content={"data": []})
         
-        # Convertimos el DataFrame a una lista de diccionarios JSON nativa
-        records = df.tail(limit).to_dict(orient="records")
+        # Convertimos el DataFrame a JSON y luego a dict para que Pandas maneje los NaNs (los convierte a null)
+        records = json.loads(df.tail(limit).to_json(orient="records"))
         return {"data": records}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -30,11 +31,11 @@ def obtener_operaciones(limit: int = 50):
 @app.get("/auditoria", summary="Obtener logs de auditoría (Watchdog y motor)")
 def obtener_auditoria(limit: int = 50):
     try:
-        df = db.obtener_auditoria()
+        df = db.obtener_logs()
         if df is None or df.empty:
             return JSONResponse(content={"data": []})
         
-        records = df.tail(limit).to_dict(orient="records")
+        records = json.loads(df.tail(limit).to_json(orient="records", date_format="iso"))
         return {"data": records}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -47,7 +48,7 @@ def obtener_cola():
         if df is None or df.empty:
             return JSONResponse(content={"data": []})
         
-        records = df.to_dict(orient="records")
+        records = json.loads(df.to_json(orient="records", date_format="iso"))
         return {"data": records}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
