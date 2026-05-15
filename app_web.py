@@ -297,6 +297,11 @@ with tabs[1]:
                             status.update(label="⛔ Entrada Bloqueada por Regla AT", state="error")
                             # REGISTRO EN BD (Intento fallido)
                             db.registrar_evento("ESTRATEGIA_BLOQUEADA", f"Ticker: {ticker} | Regla: {tipo_cruce}")
+                            enviar_alerta_webhook(
+                                "⛔ Orden Bloqueada (Regla SMA)", 
+                                f"El motor algorítmico ha bloqueado una orden de **{ticker}**.\nEl precio actual (${precio_actual}) no cumple '{tipo_cruce}' respecto a la SMA de {periodo_n} días (${validacion['valor_sma']}).", 
+                                "error"
+                            )
                             st.warning(
                                 f"Entrada BLOQUEADA. El precio (${precio_actual}) no cumple "
                                 f"'{tipo_cruce}' respecto a la SMA (${validacion['valor_sma']})."
@@ -647,6 +652,11 @@ with tabs[2]:
                         status_cancel.update(label=f"✅ Cancelación enviada — Orden #{oid}", state="complete")
                         st.success(resultado_cancel['mensaje'])
                         db.registrar_evento("ORDEN_CANCELADA", f"OrderId:{oid} | Solicitud de cancelación emitida.")
+                        enviar_alerta_webhook(
+                            "🗑️ Solicitud de Cancelación", 
+                            f"El usuario ha solicitado manualmente la cancelación de la orden **#{oid}** a través del Dashboard.", 
+                            "warning"
+                        )
                     else:
                         status_cancel.update(label="⚠️ No se pudo cancelar", state="error")
                         st.error(resultado_cancel['mensaje'])
