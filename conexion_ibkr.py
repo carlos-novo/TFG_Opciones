@@ -17,8 +17,9 @@ class GestorIBKR:
     Clase que actúa como capa intermedia entre el sistema y la API de Interactive Brokers.
     Gestiona la conexión, desconexión y la obtención de datos de mercado.
     """
-    def __init__(self, host='127.0.0.1', port=4002, client_id=1):
-        self.host = host
+    def __init__(self, host=None, port=4002, client_id=1):
+        import os
+        self.host = host or os.environ.get('IBKR_HOST', '127.0.0.1')
         self.port = port
         self.client_id = client_id
         self.ib = IB()

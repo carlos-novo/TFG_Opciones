@@ -27,5 +27,6 @@ services:
       - .:/app
     environment:
       - TZ=Europe/Madrid
+      - IBKR_HOST=host.docker.internal
     depends_on:
       - api # Asegura que la API levante primero

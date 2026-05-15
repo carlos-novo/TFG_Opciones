@@ -71,7 +71,9 @@ def iniciar_hilo_watchdog():
                 # 1. Comprobación de salud TCP (Capa 4)
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.settimeout(2.0)
-                    resultado = s.connect_ex(('127.0.0.1', 4002))
+                    import os
+                    host_ibkr = os.environ.get('IBKR_HOST', '127.0.0.1')
+                    resultado = s.connect_ex((host_ibkr, 4002))
                     estado_actual = (resultado == 0)
                 
                 if estado_previo and not estado_actual:
