@@ -52,6 +52,23 @@ class GestorBaseDatos:
             )
         ''')
         
+        # Tabla de Cola de Reintentos: Almacena órdenes fallidas por desconexión TCP
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cola_reintentos (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                fecha       TIMESTAMP,
+                ticker      TEXT,
+                vencimiento TEXT,
+                put_long    REAL,
+                put_short   REAL,
+                call_short  REAL,
+                call_long   REAL,
+                credito     REAL,
+                intentos    INTEGER,
+                status      TEXT
+            )
+        ''')
+
         conexion.commit()
         conexion.close()
 
@@ -86,6 +103,40 @@ class GestorBaseDatos:
             print(f"Error al registrar operación en BD: {e}")
         finally:
             conexion.close()
+
+    def encolar_reintento(self, ticker, vencimiento, strikes, credito):
+        """Añade una orden a la cola de reintentos cuando el Gateway se cae."""
+        conexion = self._conectar()
+        cursor = conexion.cursor()
+        ahora = datetime.now()
+        
+        cursor.execute('''
+            INSERT INTO cola_reintentos (fecha, ticker, vencimiento, put_long, put_short, call_short, call_long, credito, intentos, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'QUEUED')
+        ''', (ahora, ticker, vencimiento.strftime('%Y%m%d'), strikes[0], strikes[1], strikes[2], strikes[3], credito))
+        
+        conexion.commit()
+        conexion.close()
+        
+    def obtener_reintentos_pendientes(self):
+        """Recupera las órdenes en cola listas para reintento."""
+        import pandas as pd
+        conexion = self._conectar()
+        try:
+            df = pd.read_sql_query("SELECT * FROM cola_reintentos WHERE status = 'QUEUED'", conexion)
+            return df
+        except Exception:
+            return None
+        finally:
+            conexion.close()
+
+    def marcar_reintento_procesado(self, id_reintento, status_final):
+        """Actualiza el estado de un reintento a procesado (o fallido definitivo)."""
+        conexion = self._conectar()
+        cursor = conexion.cursor()
+        cursor.execute("UPDATE cola_reintentos SET status = ? WHERE id = ?", (status_final, id_reintento))
+        conexion.commit()
+        conexion.close()
 
     def obtener_operaciones(self):
         """

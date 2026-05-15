@@ -7,6 +7,7 @@ from conexion_ibkr import GestorIBKR
 from motor_logica import MotorEstrategias
 from base_datos import GestorBaseDatos
 from motor_bs import MotorBlackScholes
+import socket
 
 db = GestorBaseDatos()
 
@@ -51,6 +52,59 @@ def iniciar_hilo_polling():
 
 # Instanciamos el hilo al arrancar la app
 hilo_polling = iniciar_hilo_polling()
+
+# --- HILO WATCHDOG Y COLA DE REINTENTOS (DÍAS 10-11) ---
+@st.cache_resource
+def iniciar_hilo_watchdog():
+    """Lanza el hilo watchdog para comprobar la salud TCP y despachar reintentos."""
+    db_wd = GestorBaseDatos()
+    broker_wd = GestorIBKR()
+    
+    def worker():
+        estado_previo = True
+        while True:
+            try:
+                # 1. Comprobación de salud TCP (Capa 4)
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(2.0)
+                    resultado = s.connect_ex(('127.0.0.1', 4002))
+                    estado_actual = (resultado == 0)
+                
+                if estado_previo and not estado_actual:
+                    db_wd.registrar_evento("WATCHDOG_ALERTA", "Pérdida de conexión TCP con IBKR Gateway (Puerto 4002)")
+                elif not estado_previo and estado_actual:
+                    db_wd.registrar_evento("WATCHDOG_INFO", "Conexión TCP recuperada con IBKR Gateway")
+                    
+                    # 2. Procesar cola de reintentos (Capa 7)
+                    df_cola = db_wd.obtener_reintentos_pendientes()
+                    if df_cola is not None and not df_cola.empty:
+                        db_wd.registrar_evento("WATCHDOG_INFO", f"Procesando {len(df_cola)} órdenes en cola...")
+                        from datetime import datetime
+                        for _, row in df_cola.iterrows():
+                            try:
+                                v_date = datetime.strptime(row['vencimiento'], '%Y%m%d').date()
+                                strikes = [row['put_long'], row['put_short'], row['call_short'], row['call_long']]
+                                res = broker_wd.enviar_orden_iron_condor(row['ticker'], v_date, strikes, row['credito'])
+                                
+                                # Recuperación exitosa
+                                metricas_dummy = {'max_beneficio': 0, 'max_riesgo': 0, 'ratio_rb': 0}
+                                db_wd.registrar_operacion(res['order_id'], row['ticker'], v_date, strikes, row['credito'], metricas_dummy, res['status'])
+                                db_wd.marcar_reintento_procesado(row['id'], 'SENT')
+                                db_wd.registrar_evento("ORDEN_RECUPERADA", f"Orden encolada enviada al Gateway. OrderId: {res['order_id']}")
+                            except Exception as e:
+                                print(f"Fallo en reintento: {e}")
+                
+                estado_previo = estado_actual
+            except Exception as e:
+                print(f"Error en Watchdog: {e}")
+                
+            time.sleep(5)
+            
+    hilo = threading.Thread(target=worker, daemon=True)
+    hilo.start()
+    return hilo
+
+hilo_watchdog = iniciar_hilo_watchdog()
 
 # --- 0. CONFIGURACIÓN DE PÁGINA (Debe ser el primer comando de Streamlit) ---
 st.set_page_config(page_title="Plataforma de Trading", layout="wide")
@@ -351,8 +405,11 @@ with tabs[1]:
                     del st.session_state['estrategia_validada']
                     st.rerun()
                 except Exception as e:
-                    status_ord.update(label="❌ Error en la transmisión", state="error")
-                    st.error(f"Fallo al enviar la orden BAG: {e}")
+                    # Encolar en caso de fallo
+                    db.encolar_reintento(ev['ticker'], ev['vencimiento'], ev['strikes'], ev['credito_real'])
+                    db.registrar_evento("ORDEN_ENCOLADA", f"Fallo al enviar {ev['ticker']}. Añadida a cola de reintentos por caída del Gateway.")
+                    status_ord.update(label="⚠️ Servidor caído. Orden encolada", state="error")
+                    st.error("El servidor de IBKR parece estar caído. La orden ha sido guardada en la cola de reintentos y se enviará automáticamente (Watchdog) cuando vuelva la conexión.")
                     
         # --- BLOQUE DE ANÁLISIS DE SENSIBILIDAD B-S ---
         st.divider()
