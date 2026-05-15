@@ -92,10 +92,12 @@ Debido a las restricciones de la API de IBKR y a la estructura del mercado de op
 ## 🛠️ Stack Tecnológico
 
 - **Frontend:** Streamlit (Arquitectura Flat MVC)
+- **Backend API:** FastAPI con Autenticación JWT
 - **Red / Concurrencia:** `ib_insync`, `asyncio`, `nest_asyncio` (diseño *Bulk Session* con micro-sesiones efímeras)
 - **Motor Financiero:** `pandas`, `numpy`, `scipy` (Filtros Algorítmicos SMA, Black-Scholes y Greeks)
 - **Persistencia:** `sqlite3` (Audit Trail Inmutable)
-- **Seguridad:** `hashlib` (SHA-256)
+- **Seguridad:** `hashlib` (SHA-256), `python-jose` (Tokens)
+- **DevOps y QA:** `docker`, `docker-compose`, `pytest`
 
 ---
 
