@@ -1,6 +1,6 @@
 # 🎯 NUEVA HOJA DE RUTA — TFG Opciones Financieras
 **Documento único y definitivo. Reemplaza TODO.md y HOJA_RUTA.md.**
-**Fecha de creación:** 14/05/2026 | **Feature Freeze:** 21/05/2026 | **Entrega:** ~11/06/2026
+**Fecha de creación:** 15/05/2026 | **Feature Freeze:** 23/05/2026 | **Entrega:** ~11/06/2026
 
 ---
 
@@ -312,39 +312,67 @@ Crear carpeta `figures/` con los siguientes archivos:
 
 > **Objetivo Académico:** Aprovechando que la Fase 1 se completó en tiempo récord asistido por IA, esta semana extra se dedica a elevar el proyecto de un "script de finanzas" a un **Sistema Distribuido y Resiliente**, garantizando la máxima nota (Matrícula de Honor) ante un tribunal de Ingeniería Telemática.
 
-### 📅 Día 8-9 (15-16 Mayo) — Polling Asíncrono de Órdenes (Concurrencia)
+### 📅 Día 8-9 (Completado 15 Mayo) — Polling Asíncrono de Órdenes (Concurrencia)
 - [X] Implementar un task/worker asíncrono no bloqueante en `conexion_ibkr.py` que consulte periódicamente el estado (`reqOpenOrders`) de las órdenes enviadas y actualice SQLite de `Submitted` a `Filled`/`Cancelled`.
 - [X] *Justificación académica:* Demuestra dominio absoluto del event-loop de `asyncio` y la gestión de hilos/procesos sin bloquear la UI, una competencia clave en sistemas distribuidos.
 
-### 📅 Día 10-11 (17-18 Mayo) — Tolerancia a Fallos y Heartbeat (Redes)
-- [ ] Desarrollar lógica de `watchdog` (perro guardián) que verifique la salud del socket (puerto 4002) cada `N` segundos.
-- [ ] Implementar reconexión automática y "cola de reintentos" en SQLite si el Gateway de IBKR se cae durante una transmisión.
-- [ ] *Justificación académica:* Transforma el proyecto en un software de "grado industrial". Un tribunal valora enormemente la resiliencia de red y la mitigación de cortes de conexión en sistemas críticos.
+### 📅 Día 10-11 (Completado 15 Mayo) — Tolerancia a Fallos y Heartbeat (Redes)
+- [X] Desarrollar lógica de `watchdog` (perro guardián) que verifique la salud del socket (puerto 4002) cada `N` segundos.
+- [X] Implementar reconexión automática y "cola de reintentos" en SQLite si el Gateway de IBKR se cae durante una transmisión.
+- [X] *Justificación académica:* Transforma el proyecto en un software de "grado industrial". Un tribunal valora enormemente la resiliencia de red y la mitigación de cortes de conexión en sistemas críticos.
 
-### 📅 Día 12 (19 Mayo) — API REST de Monitorización (Arquitectura)
-- [ ] Exponer un microservicio ligero interno (ej. `FastAPI` en puerto 8000) que sirva el historial de auditoría y operaciones en formato JSON independiente de Streamlit.
-- [ ] *Justificación académica:* Separa el frontend de los datos, demostrando habilidades puras de desarrollo Backend y construcción de APIs RESTful inter-servicios.
+### 📅 Día 12 (Completado 15 Mayo) — API REST de Monitorización (Arquitectura)
+- [X] Exponer un microservicio ligero interno (ej. `FastAPI` en puerto 8000) que sirva el historial de auditoría y operaciones en formato JSON independiente de Streamlit.
+- [X] *Justificación académica:* Separa el frontend de los datos, demostrando habilidades puras de desarrollo Backend y construcción de APIs RESTful inter-servicios.
 
-### 📅 Día 13 (20 Mayo) — Alertas Telemétricas por Webhook (Protocolos Web)
-- [ ] Añadir peticiones POST HTTP (`requests`) para enviar notificaciones en tiempo real a Discord/Telegram cuando el motor autorice o bloquee una orden.
-- [ ] *Justificación académica:* Muestra integración nativa de protocolos HTTP y APIs externas, conectando tu sistema cerrado a infraestructuras web (puro concepto telemático).
+### 📅 Día 13 (Completado 15 Mayo) — Alertas Telemétricas por Webhook (Protocolos Web)
+- [X] Añadir peticiones POST HTTP (`requests`) para enviar notificaciones en tiempo real a Discord/Telegram cuando el motor autorice o bloquee una orden.
+- [X] *Justificación académica:* Muestra integración nativa de protocolos HTTP y APIs externas, conectando tu sistema cerrado a infraestructuras web (puro concepto telemático).
 
-### 📅 Día 14 (21 Mayo) — Feature Freeze v2.0
-- [ ] Testeo End-to-End de la Fase 2 (especialmente el hilo asíncrono y los webhooks).
-- [ ] `git tag v2.0-tfg-premium`
-- [ ] *Justificación académica:* Demuestra un ciclo de vida del software perfecto (versiones iterativas, control de versiones semántico).
+### 📅 Día 14 (Completado 15 Mayo) — Feature Freeze v2.0
+- [X] Testeo End-to-End de la Fase 2 (especialmente el hilo asíncrono y los webhooks).
+- [X] `git tag v2.0-tfg-premium`
+- [X] *Justificación académica:* Demuestra un ciclo de vida del software perfecto (versiones iterativas, control de versiones semántico).
 
 ---
 
+---
+
+## PARTE 3.7 — FASE 3: NIVEL DIOS (Matrícula de Honor) (Días 15-22)
+
+> **Objetivo Académico:** Aprovechando que la Fase 2 se completó de manera fugaz el 15 de Mayo, emplearemos los últimos 7 días antes de la redacción para añadir 4 disciplinas clave de la Ingeniería Informática y Telemática: Ciberseguridad, Data Science, QA y DevOps.
+
+### 📅 Día 15-16 (16-17 Mayo) — Ciberseguridad: Autenticación JWT en API REST
+- [ ] Implementar seguridad basada en tokens (JSON Web Tokens) en FastAPI.
+- [ ] Bloquear rutas `/operaciones` y `/auditoria` para requerir cabecera `Authorization: Bearer <token>`.
+- [ ] *Justificación académica:* Demuestra dominio de criptografía web, control de accesos y seguridad en APIs (OWASP).
+
+### 📅 Día 17-18 (18-19 Mayo) — Data Science: Módulo de Backtesting Visual
+- [ ] Descargar histórico anual de precios de un subyacente y aplicar el algoritmo SMA retrospectivamente.
+- [ ] Usar `plotly` para dibujar en Streamlit un gráfico interactivo con la curva de precios, la SMA y marcadores verdes/rojos de compra/bloqueo.
+- [ ] *Justificación académica:* Dota al proyecto de una dimensión de Big Data y Análisis Cuantitativo imprescindible en finanzas e IA.
+
+### 📅 Día 19-20 (20-21 Mayo) — Calidad del Software (QA): Tests Unitarios y CI
+- [ ] Programar suite de tests en `tests/` con `pytest` para verificar matemáticamente las Griegas y la lógica del Watchdog.
+- [ ] *Justificación académica:* Muestra madurez y rigurosidad en Ingeniería del Software (TDD / Pruebas automatizadas de backend).
+
+### 📅 Día 21 (22 Mayo) — DevOps: Contenedorización con Docker
+- [ ] Crear un `Dockerfile` optimizado y un `docker-compose.yml` para desplegar la UI y la API como contenedores orquestados.
+- [ ] *Justificación académica:* Dominio del despliegue moderno Cloud-Native y orquestación de sistemas distribuidos.
+
+### 📅 Día 22 (23 Mayo) — Feature Freeze Absoluto v3.0
+- [ ] `git tag v3.0-tfg-dios`
+- [ ] Validación end-to-end de todos los contenedores y de la seguridad de la API.
+
 ## PARTE 4 — CALENDARIO SEMANAS 3–5 (Memoria LaTeX)
 
-> A partir del **22/05/2026**, cero código nuevo. Solo memoria.
+> A partir del **24/05/2026**, cero código nuevo. Solo memoria.
 
 | Semana | Fechas | Objetivo |
 |---|---|---|
-| **Semana 2** | 22–28 Mayo | Redactar: Introducción, Estado del Arte, Diseño del Sistema |
-| **Semana 3** | 29 Mayo – 4 Jun | Redactar: Implementación, Pruebas, Resultados |
-| **Semana 4** | 5–11 Jun | Redactar: Conclusiones, revisión completa, PDF final, 10 slides |
+| **Semana 2** | 24–30 Mayo | Redactar: Introducción, Estado del Arte, Diseño del Sistema |
+| **Semana 3** | 31 Mayo – 6 Jun | Redactar: Implementación, Pruebas, Resultados |
+| **Semana 4** | 7–13 Jun | Redactar: Conclusiones, revisión completa, PDF final, 10 slides |
 
 ### Estructura de Capítulos Recomendada
 
@@ -384,12 +412,13 @@ Anexos: Código relevante, capturas de pantalla, salida de pytest, heatmap
 ✅ Fase 2 — Motor Lógico y Financiero:             COMPLETADA
 ✅ Fase 3 — Seguridad y Persistencia:              COMPLETADA
 ✅ Fase 4 — Ejecución y Ciclo de Vida Orden:       COMPLETADA
-✅ Fase 5 — Hardening + Tests + B-S + Heatmap:    COMPLETADA (15/05/2026)
-🔄 Fase 6 — Hardening Premium (Días 8-14):         EN CURSO (15/05/2026) (Feature Freeze: 22/05/2026)
-⏳ Fase 7 — Memoria LaTeX:                         PENDIENTE (inicio: 22/05/2026)
+✅ Fase 5 — Hardening + Tests + B-S + Heatmap:    COMPLETADA (14/05/2026)
+✅ Fase 6 — Hardening Premium (Días 8-14):         COMPLETADA (15/05/2026)
+🔄 Fase 7 — Nivel Dios (Días 15-22):               EN CURSO (16/05/2026) (Feature Freeze: 23/05/2026)
+⏳ Fase 8 — Memoria LaTeX:                         PENDIENTE (inicio: 24/05/2026)
 ```
 
 ---
 
 *Este documento es la fuente única de verdad hasta la entrega del TFG.*
-*Última actualización: 14/05/2026 — Revisión v2: timelines con IA, heatmap B-S, Greeks, export CSV, CI/GitHub Actions añadidos.*
+*Última actualización: 15/05/2026 — Revisión v2: timelines con IA, heatmap B-S, Greeks, export CSV, CI/GitHub Actions añadidos.*
