@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  # Microservicio del Backend (FastAPI)
+  api:
+    build: .
+    container_name: tfg_api
+    command: uvicorn api_rest:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      # Sincronizamos el directorio actual con el contenedor
+      # Esto permite que la BD SQLite se comparta y persista en tu ordenador
+      - .:/app
+    environment:
+      - TZ=Europe/Madrid
+      - IBKR_HOST=host.docker.internal # Importante para que el contenedor Linux encuentre el IB Gateway de tu Windows
+
+  # Microservicio del Frontend (Streamlit)
+  web:
+    build: .
+    container_name: tfg_web
+    command: streamlit run app_web.py --server.port 8501 --server.address 0.0.0.0
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/app
+    environment:
+      - TZ=Europe/Madrid
+    depends_on:
+      - api # Asegura que la API levante primero

@@ -357,12 +357,12 @@ Crear carpeta `figures/` con los siguientes archivos:
 - [x] *Justificación académica:* Muestra madurez y rigurosidad en Ingeniería del Software (TDD / Pruebas automatizadas de backend).
 
 ### 📅 Día 21 (22 Mayo) — DevOps: Contenedorización con Docker
-- [ ] Crear un `Dockerfile` optimizado y un `docker-compose.yml` para desplegar la UI y la API como contenedores orquestados.
-- [ ] *Justificación académica:* Dominio del despliegue moderno Cloud-Native y orquestación de sistemas distribuidos.
+- [x] Crear un `Dockerfile` optimizado y un `docker-compose.yml` para desplegar la UI y la API como contenedores orquestados.
+- [x] *Justificación académica:* Dominio del despliegue moderno Cloud-Native y orquestación de sistemas distribuidos.
 
 ### 📅 Día 22 (23 Mayo) — Feature Freeze Absoluto v3.0
-- [ ] `git tag v3.0-tfg-dios`
-- [ ] Validación end-to-end de todos los contenedores y de la seguridad de la API.
+- [x] `git tag v3.0-tfg-dios`
+- [x] Validación end-to-end de todos los contenedores y de la seguridad de la API.
 
 ## PARTE 4 — CALENDARIO SEMANAS 3–5 (Memoria LaTeX)
 
