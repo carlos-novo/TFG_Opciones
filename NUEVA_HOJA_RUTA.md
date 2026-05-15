@@ -296,15 +296,15 @@ Crear carpeta `figures/` con los siguientes archivos:
 
 **Objetivo: El código queda congelado. No se toca más.**
 
-- [ ] **Docstrings**: Verificar que cada método público en `motor_logica.py`, `conexion_ibkr.py` y `base_datos.py` tiene docstring. Los existentes son suficientes; solo añadir donde falten.
-- [ ] **Limpieza de `app_web.py`**: Eliminar cualquier `print()` de depuración residual.
-- [ ] **Commit de congelación**:
+- [X] **Docstrings**: Verificar que cada método público en `motor_logica.py`, `conexion_ibkr.py` y `base_datos.py` tiene docstring. Los existentes son suficientes; solo añadir donde falten.
+- [X] **Limpieza de `app_web.py`**: Eliminar cualquier `print()` de depuración residual.
+- [X] **Commit de congelación**:
   ```bash
   git add .
   git commit -m "chore: feature freeze v1.0 — TFG Opciones Financieras"
   git tag v1.0-tfg
   ```
-- [ ] **Verificación end-to-end**: Ejecutar la aplicación completa y navegar por todos los tabs. Confirmar que no hay excepciones no capturadas ni errores en consola.
+- [X] **Verificación end-to-end**: Ejecutar la aplicación completa y navegar por todos los tabs. Confirmar que no hay excepciones no capturadas ni errores en consola.
 
 ---
 
@@ -313,8 +313,8 @@ Crear carpeta `figures/` con los siguientes archivos:
 > **Objetivo Académico:** Aprovechando que la Fase 1 se completó en tiempo récord asistido por IA, esta semana extra se dedica a elevar el proyecto de un "script de finanzas" a un **Sistema Distribuido y Resiliente**, garantizando la máxima nota (Matrícula de Honor) ante un tribunal de Ingeniería Telemática.
 
 ### 📅 Día 8-9 (15-16 Mayo) — Polling Asíncrono de Órdenes (Concurrencia)
-- [ ] Implementar un task/worker asíncrono no bloqueante en `conexion_ibkr.py` que consulte periódicamente el estado (`reqOpenOrders`) de las órdenes enviadas y actualice SQLite de `Submitted` a `Filled`/`Cancelled`.
-- [ ] *Justificación académica:* Demuestra dominio absoluto del event-loop de `asyncio` y la gestión de hilos/procesos sin bloquear la UI, una competencia clave en sistemas distribuidos.
+- [X] Implementar un task/worker asíncrono no bloqueante en `conexion_ibkr.py` que consulte periódicamente el estado (`reqOpenOrders`) de las órdenes enviadas y actualice SQLite de `Submitted` a `Filled`/`Cancelled`.
+- [X] *Justificación académica:* Demuestra dominio absoluto del event-loop de `asyncio` y la gestión de hilos/procesos sin bloquear la UI, una competencia clave en sistemas distribuidos.
 
 ### 📅 Día 10-11 (17-18 Mayo) — Tolerancia a Fallos y Heartbeat (Redes)
 - [ ] Desarrollar lógica de `watchdog` (perro guardián) que verifique la salud del socket (puerto 4002) cada `N` segundos.
