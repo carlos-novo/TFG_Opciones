@@ -126,7 +126,21 @@ class GestorBaseDatos:
         finally:
             conexion.close()
 
-    
+    def actualizar_estado_orden(self, order_id, nuevo_estado):
+        """Actualiza el estado de una operación en la base de datos."""
+        conexion = self._conectar()
+        cursor = conexion.cursor()
+        try:
+            cursor.execute(
+                "UPDATE operaciones SET status = ? WHERE order_id = ?",
+                (nuevo_estado, order_id)
+            )
+            conexion.commit()
+        except Exception as e:
+            print(f"Error al actualizar estado en BD: {e}")
+        finally:
+            conexion.close()
+
     def obtener_logs(self):
         """
         Recupera todos los registros de auditoría ordenados por fecha descendente.

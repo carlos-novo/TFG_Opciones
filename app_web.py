@@ -1,12 +1,52 @@
 import streamlit as st
 import hashlib
 from datetime import date
+import threading
+import time
 from conexion_ibkr import GestorIBKR
 from motor_logica import MotorEstrategias
 from base_datos import GestorBaseDatos
 from motor_bs import MotorBlackScholes
 
 db = GestorBaseDatos()
+
+# --- HILO DE POLLING ASÍNCRONO (DÍA 8) ---
+@st.cache_resource
+def iniciar_hilo_polling():
+    """Lanza el hilo de polling en background para órdenes (solo 1 vez por sesión global)."""
+    db_poll = GestorBaseDatos()
+    broker_poll = GestorIBKR()
+    
+    def worker():
+        while True:
+            try:
+                df_ops = db_poll.obtener_operaciones()
+                if df_ops is not None and not df_ops.empty:
+                    # Filtramos las órdenes que aún no son finales
+                    pendientes = df_ops[~df_ops['status'].isin(['Filled', 'Cancelled', 'Inactive'])]
+                    if not pendientes.empty:
+                        estados_actuales = broker_poll.consultar_estado_ordenes()
+                        for _, row in pendientes.iterrows():
+                            oid = row['order_id']
+                            estado_anterior = row['status']
+                            
+                            if oid in estados_actuales:
+                                nuevo_estado = estados_actuales[oid]
+                                if nuevo_estado != estado_anterior:
+                                    db_poll.actualizar_estado_orden(oid, nuevo_estado)
+                                    db_poll.registrar_evento('POLLING_ACTUALIZACION', f"Orden #{oid}: {estado_anterior} -> {nuevo_estado}")
+            except Exception as e:
+                print(f"Hilo de polling: Error -> {e}")
+            
+            # Polling cada 10 segundos (no bloquea UI)
+            time.sleep(10)
+
+    hilo = threading.Thread(target=worker, daemon=True)
+    hilo.start()
+    return hilo
+
+# Instanciamos el hilo al arrancar la app
+hilo_polling = iniciar_hilo_polling()
 
 # --- 0. CONFIGURACIÓN DE PÁGINA (Debe ser el primer comando de Streamlit) ---
 st.set_page_config(page_title="Plataforma de Trading", layout="wide")

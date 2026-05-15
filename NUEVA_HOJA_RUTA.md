@@ -203,16 +203,16 @@ Crear carpeta `figures/` con:
   git push --tags
   ```
 
-### 📅 Día 1-2 (14–15 Mayo) — Hardening de Infraestructura
+### 📅 Día 1-2 (14 Mayo) — Hardening de Infraestructura
 
 **Objetivo: Que cualquier persona pueda ejecutar el proyecto desde cero.**
 
-- [ ] **`requirements.txt`**: Generar con `pip freeze > requirements.txt` y limpiar paquetes irrelevantes. Mínimo: `streamlit`, `ib_insync`, `nest_asyncio`, `pandas`, `pytest`.
-- [ ] **`README.md`**: Reescribir con secciones: Descripción, Prerequisitos (IBKR Gateway en puerto 4002), Instalación, Ejecución (`streamlit run app_web.py`), Credenciales (admin/admin2026), Reglas operativas (strikes múltiplos de 100, vencimientos SPXW semanales).
-- [ ] **`.env.example`**: Crear con `IBKR_HOST=127.0.0.1`, `IBKR_PORT=4002`. Documentar que el hash SHA-256 está hardcodeado por simplicidad de demo.
-- [ ] **Verificar `.gitignore`**: El fichero `tfg_trading.db` debe estar versionado para demostrar el historial de auditoría.
+- [X] **`requirements.txt`**: Generar con `pip freeze > requirements.txt` y limpiar paquetes irrelevantes. Mínimo: `streamlit`, `ib_insync`, `nest_asyncio`, `pandas`, `pytest`.
+- [X] **`README.md`**: Reescribir con secciones: Descripción, Prerequisitos (IBKR Gateway en puerto 4002), Instalación, Ejecución (`streamlit run app_web.py`), Credenciales (admin/admin2026), Reglas operativas (strikes múltiplos de 100, vencimientos SPXW semanales).
+- [X] **`.env.example`**: Crear con `IBKR_HOST=127.0.0.1`, `IBKR_PORT=4002`. Documentar que el hash SHA-256 está hardcodeado por simplicidad de demo.
+- [X] **Verificar `.gitignore`**: El fichero `tfg_trading.db` debe estar versionado para demostrar el historial de auditoría.
 
-### 📅 Día 3-4 (16–17 Mayo) — Tests Mínimos Verificables
+### 📅 Día 3-4 (14 Mayo) — Tests Mínimos Verificables
 
 **Objetivo: Responder "sí" a la pregunta del tribunal "¿tienes tests?".**
 
@@ -274,10 +274,10 @@ def test_sma_bloquea_si_datos_insuficientes():
         )
 ```
 
-- [ ] Ejecutar `pytest tests/ -v` y confirmar que los 5 tests pasan en verde.
+- [X] Ejecutar `pytest tests/ -v` y confirmar que los 5 tests pasan en verde.
 - [ ] Hacer screenshot de la salida del pytest → guardar como `figures/fig_pytest_output.png`.
 
-### 📅 Día 5-6 (18–19 Mayo) — Captura de Evidencias para la Memoria
+### 📅 Día 5-6 (14 Mayo) — Captura de Evidencias para la Memoria
 
 **Objetivo: Tener todos los assets visuales listos antes de escribir la memoria.**
 
@@ -292,7 +292,7 @@ Crear carpeta `figures/` con los siguientes archivos:
 - [ ] **`fig_posiciones.png`** — Captura del panel de posiciones abiertas de la cartera.
 - [ ] **`fig_pytest_output.png`** — Captura de terminal con los 5 tests en verde.
 
-### 📅 Día 7 (20–21 Mayo) — Feature Freeze + Revisión Final
+### 📅 Día 7 (14 Mayo) — Feature Freeze + Revisión Final
 
 **Objetivo: El código queda congelado. No se toca más.**
 
@@ -308,7 +308,35 @@ Crear carpeta `figures/` con los siguientes archivos:
 
 ---
 
-## PARTE 4 — CALENDARIO SEMANAS 2–4 (Memoria LaTeX)
+## PARTE 3.5 — FASE 2: HARDENING Y FEATURES PREMIUM (Días 8-14)
+
+> **Objetivo Académico:** Aprovechando que la Fase 1 se completó en tiempo récord asistido por IA, esta semana extra se dedica a elevar el proyecto de un "script de finanzas" a un **Sistema Distribuido y Resiliente**, garantizando la máxima nota (Matrícula de Honor) ante un tribunal de Ingeniería Telemática.
+
+### 📅 Día 8-9 (15-16 Mayo) — Polling Asíncrono de Órdenes (Concurrencia)
+- [ ] Implementar un task/worker asíncrono no bloqueante en `conexion_ibkr.py` que consulte periódicamente el estado (`reqOpenOrders`) de las órdenes enviadas y actualice SQLite de `Submitted` a `Filled`/`Cancelled`.
+- [ ] *Justificación académica:* Demuestra dominio absoluto del event-loop de `asyncio` y la gestión de hilos/procesos sin bloquear la UI, una competencia clave en sistemas distribuidos.
+
+### 📅 Día 10-11 (17-18 Mayo) — Tolerancia a Fallos y Heartbeat (Redes)
+- [ ] Desarrollar lógica de `watchdog` (perro guardián) que verifique la salud del socket (puerto 4002) cada `N` segundos.
+- [ ] Implementar reconexión automática y "cola de reintentos" en SQLite si el Gateway de IBKR se cae durante una transmisión.
+- [ ] *Justificación académica:* Transforma el proyecto en un software de "grado industrial". Un tribunal valora enormemente la resiliencia de red y la mitigación de cortes de conexión en sistemas críticos.
+
+### 📅 Día 12 (19 Mayo) — API REST de Monitorización (Arquitectura)
+- [ ] Exponer un microservicio ligero interno (ej. `FastAPI` en puerto 8000) que sirva el historial de auditoría y operaciones en formato JSON independiente de Streamlit.
+- [ ] *Justificación académica:* Separa el frontend de los datos, demostrando habilidades puras de desarrollo Backend y construcción de APIs RESTful inter-servicios.
+
+### 📅 Día 13 (20 Mayo) — Alertas Telemétricas por Webhook (Protocolos Web)
+- [ ] Añadir peticiones POST HTTP (`requests`) para enviar notificaciones en tiempo real a Discord/Telegram cuando el motor autorice o bloquee una orden.
+- [ ] *Justificación académica:* Muestra integración nativa de protocolos HTTP y APIs externas, conectando tu sistema cerrado a infraestructuras web (puro concepto telemático).
+
+### 📅 Día 14 (21 Mayo) — Feature Freeze v2.0
+- [ ] Testeo End-to-End de la Fase 2 (especialmente el hilo asíncrono y los webhooks).
+- [ ] `git tag v2.0-tfg-premium`
+- [ ] *Justificación académica:* Demuestra un ciclo de vida del software perfecto (versiones iterativas, control de versiones semántico).
+
+---
+
+## PARTE 4 — CALENDARIO SEMANAS 3–5 (Memoria LaTeX)
 
 > A partir del **22/05/2026**, cero código nuevo. Solo memoria.
 
@@ -352,13 +380,13 @@ Anexos: Código relevante, capturas de pantalla, salida de pytest, heatmap
 
 ## ESTADO DEL PROYECTO (resumen ejecutivo)
 
-```
 ✅ Fase 1 — Arquitectura y Conectividad:           COMPLETADA
 ✅ Fase 2 — Motor Lógico y Financiero:             COMPLETADA
 ✅ Fase 3 — Seguridad y Persistencia:              COMPLETADA
 ✅ Fase 4 — Ejecución y Ciclo de Vida Orden:       COMPLETADA
-🔄 Fase 5 — Hardening + Tests + B-S + Heatmap:    EN CURSO (Feature Freeze: 21/05)
-⏳ Fase 6 — Memoria LaTeX:                         PENDIENTE (inicio: 22/05)
+✅ Fase 5 — Hardening + Tests + B-S + Heatmap:    COMPLETADA (15/05/2026)
+🔄 Fase 6 — Hardening Premium (Días 8-14):         EN CURSO (15/05/2026) (Feature Freeze: 22/05/2026)
+⏳ Fase 7 — Memoria LaTeX:                         PENDIENTE (inicio: 22/05/2026)
 ```
 
 ---

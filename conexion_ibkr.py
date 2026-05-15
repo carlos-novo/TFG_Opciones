@@ -441,3 +441,34 @@ class GestorIBKR:
                 "exito": False,
                 "mensaje": f"Error técnico al intentar cancelar la orden #{order_id}: {e}"
             }
+
+    def consultar_estado_ordenes(self):
+        """
+        Micro-sesión de polling: Obtiene todas las órdenes abiertas y ejecuciones del día
+        para actualizar el estado de las órdenes previamente enviadas.
+        Retorna un dict {order_id: status}.
+        """
+        self._asegurar_event_loop()
+        ib_temp = IB()
+        estados = {}
+        try:
+            # clientId=92 para polling en background
+            ib_temp.connect(self.host, self.port, clientId=92)
+            
+            # Pedimos open orders
+            open_orders = ib_temp.reqOpenOrders()
+            for trade in open_orders:
+                estados[trade.order.orderId] = trade.orderStatus.status
+                
+            # Pedimos executions (órdenes que han sido Filled hoy)
+            executions = ib_temp.reqExecutions()
+            for fill in executions:
+                estados[fill.execution.orderId] = 'Filled'
+                
+            ib_temp.disconnect()
+            return estados
+        except Exception as e:
+            print(f"Error en polling de órdenes: {e}")
+            if ib_temp.isConnected():
+                ib_temp.disconnect()
+            return {}
