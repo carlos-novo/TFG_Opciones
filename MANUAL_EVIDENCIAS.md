@@ -77,7 +77,9 @@ El bloqueo preventivo del motor lógico se propaga de forma inmediata a los cana
 ## 6. Paso 4.5: Módulo de Backtesting Histórico (Data Science)
 Para evaluar la viabilidad de las estrategias algorítmicas en el largo plazo, la plataforma integra un módulo de simulación histórica vectorizado que no depende de la conexión con el bróker.
 
-Este subsistema descarga la serie temporal de precios diarios del último año del activo subyacente (utilizando la API de **Yahoo Finance**), calcula dinámicamente la curva de la Media Móvil (SMA) y ejecuta de forma retrospectiva el filtro lógico. La interfaz web renderiza un gráfico interactivo (desarrollado con **Plotly**) que resalta con marcadores verdes y rojos los momentos exactos en los que el algoritmo habría autorizado o vetado operaciones, permitiendo al operador realizar un análisis visual de robustez estadística (Backtesting).
+Este subsistema descarga la serie temporal de precios diarios del último año del activo subyacente (utilizando la API de **Yahoo Finance**), calcula dinámicamente la curva de la Media Móvil (SMA) y ejecuta de forma retrospectiva el filtro lógico. La interfaz web renderiza un gráfico interactivo (desarrollado con **Plotly**) que resalta con marcadores verdes y rojos los momentos exactos en los que el algoritmo habría autorizado o vetado operaciones, permitiendo al operador realizar un análisis visual de robustez estadística (Backtesting). 
+
+En el ejemplo visual inferior, se realiza la simulación retrospectiva sobre el índice **S&P 500 (SPX)** utilizando un periodo de **SMA de 50 días** para maximizar la densidad de cruces y validar la velocidad de respuesta del filtro algorítmico.
 
 ![Simulación de Backtesting Histórico y Señales Algorítmicas](figures/fig_backtesting.png)
 
