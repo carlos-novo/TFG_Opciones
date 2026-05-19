@@ -106,7 +106,8 @@ Para cumplir con los estándares de auditoría de los sistemas telemáticos tran
 
 El panel de monitorización permite al administrador consultar estos históricos e interactuar directamente con ellos (ej. descargar los reportes consolidados en formato CSV para su análisis externo o solicitar cancelaciones activas de órdenes pendientes).
 
-![Panel de Monitorización y Descarga CSV](figures/fig_monitorizacion.png)
+![Registro Detallado de Actividad y Logs de Auditoría](figures/fig_monitarizacion_1.png)
+![Historial de Órdenes Ejecutadas y Panel de Cancelación](figures/fig_monitarizacion_2.png)
 
 ---
 
@@ -133,4 +134,5 @@ Finalmente, para asegurar la portabilidad y la reproducibilidad técnica en cual
 
 Mediante el orquestador **Docker Compose**, se levantan e intercomunican simultáneamente el contenedor del Frontend (Streamlit en puerto 8501) y el del microservicio Backend (FastAPI en puerto 8000), garantizando que todo el entorno se ejecute con un único comando.
 
-![Contenedores Docker Levantados](figures/fig_docker_compose.png)
+![Construcción y Lanzamiento de Contenedores por Consola](figures/fig_docker_compose.png)
+![Estado de los Contenedores Activos en Docker Desktop](figures/fig_containers_docker_desktop.png)
