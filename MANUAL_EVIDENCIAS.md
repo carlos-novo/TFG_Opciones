@@ -74,7 +74,16 @@ El bloqueo preventivo del motor lógico se propaga de forma inmediata a los cana
 
 ---
 
-## 6. Paso 5: Telemetría y Alertas en Tiempo Real
+## 6. Paso 4.5: Módulo de Backtesting Histórico (Data Science)
+Para evaluar la viabilidad de las estrategias algorítmicas en el largo plazo, la plataforma integra un módulo de simulación histórica vectorizado que no depende de la conexión con el bróker.
+
+Este subsistema descarga la serie temporal de precios diarios del último año del activo subyacente (utilizando la API de **Yahoo Finance**), calcula dinámicamente la curva de la Media Móvil (SMA) y ejecuta de forma retrospectiva el filtro lógico. La interfaz web renderiza un gráfico interactivo (desarrollado con **Plotly**) que resalta con marcadores verdes y rojos los momentos exactos en los que el algoritmo habría autorizado o vetado operaciones, permitiendo al operador realizar un análisis visual de robustez estadística (Backtesting).
+
+![Simulación de Backtesting Histórico y Señales Algorítmicas](figures/fig_backtesting.png)
+
+---
+
+## 7. Paso 5: Telemetría y Alertas en Tiempo Real
 Cuando la validación técnica y cuantitativa resulta favorable, los detalles completos del combo multi-pata se empaquetan en una orden tipo BAG para mitigar el riesgo de ejecución pata a pata (ejecución atómica). 
 
 En el instante exacto del envío, un módulo asíncrono realiza una petición POST HTTP hacia el servidor telemático externo (Discord Webhook). La carga útil (Payload) en formato JSON detalla de manera estructurada los strikes elegidos, el crédito de mercado obtenido y el identificador de orden generado para garantizar el control a distancia.
@@ -83,7 +92,7 @@ En el instante exacto del envío, un módulo asíncrono realiza una petición PO
 
 ---
 
-## 7. Paso 6: Tolerancia a Fallos de Red y Resiliencia (Watchdog)
+## 8. Paso 6: Tolerancia a Fallos de Red y Resiliencia (Watchdog)
 
 ### A. Detección y Encolamiento local
 Ante una caída en la conexión de red o una parada inesperada del Gateway del bróker, el sistema activa su mecanismo de tolerancia a fallos. 
@@ -101,7 +110,7 @@ Al detectar que la conexión de red o el socket del bróker vuelve a estar activ
 
 ---
 
-## 8. Paso 7: Auditoría Permanente y Trazabilidad
+## 9. Paso 7: Auditoría Permanente y Trazabilidad
 Para cumplir con los estándares de auditoría de los sistemas telemáticos transaccionales, cada evento relevante (logins exitosos, accesos bloqueados, bloqueos por reglas técnicas de SMA, envíos de órdenes y cancelaciones) es registrado de manera persistente con marcas de tiempo en formato UNIX. 
 
 El panel de monitorización permite al administrador consultar estos históricos e interactuar directamente con ellos (ej. descargar los reportes consolidados en formato CSV para su análisis externo o solicitar cancelaciones activas de órdenes pendientes).
@@ -111,7 +120,7 @@ El panel de monitorización permite al administrador consultar estos históricos
 
 ---
 
-## 9. Paso 8: Capa de Interoperabilidad (API REST Cibersegura)
+## 10. Paso 8: Capa de Interoperabilidad (API REST Cibersegura)
 El sistema desacopla el frontend del backend mediante un microservicio construido con **FastAPI**. Sin embargo, la exposición pública de datos de auditoría de mercado representa un riesgo de seguridad elevado. 
 
 Por ello, se implementó un flujo estándar **OAuth2** con tokens **JWT** firmados criptográficamente. Al acceder a la interfaz de documentación interactiva Swagger UI, todos los recursos y operaciones REST (`/operaciones`, `/auditoria`, `/cola-reintentos`) muestran un icono de candado que bloquea la respuesta HTTP con un código `401 Unauthorized` a menos que el cliente se autentique proporcionando un token válido expedido por el endpoint `/token`.
@@ -120,7 +129,7 @@ Por ello, se implementó un flujo estándar **OAuth2** con tokens **JWT** firmad
 
 ---
 
-## 10. Paso 9: Aseguramiento de Calidad (QA) y Despliegue (DevOps)
+## 11. Paso 9: Aseguramiento de Calidad (QA) y Despliegue (DevOps)
 
 ### A. Pruebas Unitarias (`pytest`)
 Con el objetivo de certificar el rigor científico del software y la precisión matemática del cálculo de derivadas financieras y regresiones del motor algorítmico, el repositorio incluye una suite automatizada de pruebas unitarias basadas en `pytest`. 
