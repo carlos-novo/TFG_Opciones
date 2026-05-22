@@ -1,10 +1,10 @@
-import streamlit as st
+﻿import streamlit as st
 import hashlib
 from datetime import date
 import threading
 import time
 from conexion_ibkr import GestorIBKR
-from motor_logica import MotorEstrategias
+from motor_logica import MotorEstrategias, MotorSalida
 from base_datos import GestorBaseDatos
 from motor_bs import MotorBlackScholes
 from notificaciones import enviar_alerta_webhook
@@ -123,6 +123,133 @@ def iniciar_hilo_watchdog():
     return hilo
 
 hilo_watchdog = iniciar_hilo_watchdog()
+
+# --- ESTADO COMPARTIDO DEL MONITOR DE SALIDA (thread-safe) ---
+# Este dict es la única vía de comunicación entre el hilo daemon y la UI de Streamlit.
+# Se gestiona con @st.cache_resource para sobrevivir a los reruns de Streamlit.
+@st.cache_resource
+def obtener_estado_monitor():
+    """Devuelve el dict compartido del Monitor de Salida (singleton por proceso)."""
+    return {
+        "activo":           False,
+        "ticker":           None,
+        "vencimiento":      None,
+        "strikes":          None,
+        "credito_inicial":  0.0,
+        "pct_tp":           50.0,
+        "pct_sl":           200.0,
+        "pnl_actual":       None,   # Actualizado por el hilo en cada ciclo
+        "ultimo_evento":    None,   # 'TAKE_PROFIT' | 'STOP_LOSS' | None
+    }
+
+# --- HILO WATCHDOG DE SALIDA (TP/SL) ---
+@st.cache_resource
+def iniciar_hilo_watchdog_salida():
+    """
+    Lanza el Watchdog de Salida en background (solo 1 vez por sesión global).
+
+    El hilo monitoriza en tiempo real el P&L de la posición Iron Condor activa
+    consultando a IBKR cada 15 segundos. Cuando el P&L supera el umbral de
+    Take Profit o Stop Loss, ejecuta automáticamente la orden de cierre BAG
+    y notifica por Discord.
+
+    Patrón idéntico al Watchdog de red: threading.Thread(daemon=True) +
+    @st.cache_resource para garantizar una única instancia por proceso.
+    """
+    db_ms  = GestorBaseDatos()
+    broker_ms = GestorIBKR()
+    estado = obtener_estado_monitor()   # Referencia al dict compartido
+
+    def worker():
+        from motor_logica import MotorSalida
+        while True:
+            try:
+                if estado["activo"] and estado["ticker"]:
+                    # 1. Consultar P&L actual filtrando por el ticker de la estrategia
+                    pnl = broker_ms.obtener_pnl_posiciones_opciones(
+                        ticker_filtro=estado["ticker"]
+                    )
+
+                    if pnl is not None:
+                        # Actualizamos el P&L en el dict compartido para la UI
+                        estado["pnl_actual"] = pnl
+
+                        # 2. Evaluar si se han alcanzado los umbrales
+                        resultado = MotorSalida.evaluar_condicion_salida(
+                            pnl_actual      = pnl,
+                            credito_inicial = estado["credito_inicial"],
+                            pct_tp          = estado["pct_tp"],
+                            pct_sl          = estado["pct_sl"]
+                        )
+
+                        accion = resultado["accion"]
+
+                        if accion in ("TAKE_PROFIT", "STOP_LOSS"):
+                            # 3. Ejecutar el cierre automático
+                            try:
+                                res_cierre = broker_ms.enviar_orden_cierre_iron_condor(
+                                    ticker      = estado["ticker"],
+                                    vencimiento = estado["vencimiento"],
+                                    strikes     = estado["strikes"]
+                                )
+
+                                # 4. Registrar en auditoría
+                                etiqueta = "CIERRE_TP" if accion == "TAKE_PROFIT" else "CIERRE_SL"
+                                db_ms.registrar_evento(
+                                    etiqueta,
+                                    f"Ticker:{estado['ticker']} | P&L:{pnl} | "
+                                    f"OrderId:{res_cierre['order_id']} | Status:{res_cierre['status']}"
+                                )
+
+                                # 5. Notificar por Discord
+                                pnl_pct_real = round((pnl / estado["credito_inicial"]) * 100, 1) if estado["credito_inicial"] else 0
+                                if accion == "TAKE_PROFIT":
+                                    enviar_alerta_webhook(
+                                        "🟢 Take Profit Alcanzado — Posición Cerrada",
+                                        f"**Ticker:** {estado['ticker']}\n"
+                                        f"**P&L al cierre:** ${pnl}\n"
+                                        f"**Umbral TP:** +${resultado['umbral_tp_usd']} "
+                                        f"({estado['pct_tp']}% de la prima)\n"
+                                        f"**OrderId de cierre:** {res_cierre['order_id']}",
+                                        "success"   # Verde
+                                    )
+                                else:
+                                    enviar_alerta_webhook(
+                                        "🔴 Stop Loss Alcanzado — Posición Cerrada",
+                                        f"**Ticker:** {estado['ticker']}\n"
+                                        f"**P&L al cierre:** ${pnl}\n"
+                                        f"**Umbral SL:** ${resultado['umbral_sl_usd']} "
+                                        f"({estado['pct_sl']}% de la prima)\n"
+                                        f"**OrderId de cierre:** {res_cierre['order_id']}",
+                                        "error"     # Rojo
+                                    )
+
+                                # 6. Desactivar el monitor para evitar dobles cierres
+                                estado["activo"]        = False
+                                estado["ultimo_evento"] = accion
+
+                            except Exception as e_cierre:
+                                db_ms.registrar_evento(
+                                    "ERROR_CIERRE_AUTOMATICO",
+                                    f"Ticker:{estado['ticker']} | Acción:{accion} | Error:{e_cierre}"
+                                )
+                                enviar_alerta_webhook(
+                                    "⚠️ Error en Cierre Automático",
+                                    f"El Watchdog de Salida no pudo cerrar la posición de "
+                                    f"**{estado['ticker']}** ({accion}).\nError técnico: {e_cierre}",
+                                    "warning"
+                                )
+
+            except Exception as e:
+                print(f"Watchdog de Salida: Error en ciclo de monitoreo — {e}")
+
+            time.sleep(15)  # Intervalo de polling: 15 segundos
+
+    hilo = threading.Thread(target=worker, daemon=True)
+    hilo.start()
+    return hilo
+
+hilo_watchdog_salida = iniciar_hilo_watchdog_salida()
 
 # --- 0. CONFIGURACIÓN DE PÁGINA (Debe ser el primer comando de Streamlit) ---
 st.set_page_config(page_title="Plataforma de Trading", layout="wide")
@@ -425,14 +552,25 @@ with tabs[1]:
                         status     = res['status']
                     )
                     del st.session_state['estrategia_validada']
-                    
-                    # --- WEBHOOK DÍA 13 ---
+
+                    st.session_state['orden_pendiente_monitor'] = {
+                        'order_id':    res['order_id'],
+                        'ticker':      ev['ticker'],
+                        'vencimiento': ev['vencimiento'],
+                        'strikes':     ev['strikes'],
+                        'credito':     ev['credito_real'],
+                    }
+
                     enviar_alerta_webhook(
-                        "✅ Nueva Orden Iron Condor Enviada", 
-                        f"**Ticker:** {ev['ticker']}\n**Crédito:** ${ev['credito_real']}\n**Riesgo Máx:** ${ev['metricas']['max_riesgo']}\n**OrderId:** {res['order_id']}", 
+                        "✅ Nueva Orden Iron Condor Enviada",
+                        f"**Ticker:** {ev['ticker']}\n"
+                        f"**Crédito cobrado:** ${ev['credito_real']} · "
+                        f"**Riesgo Máx:** ${ev['metricas']['max_riesgo']}\n"
+                        f"**OrderId:** {res['order_id']}\n"
+                        f"⏳ Configura el Monitor de Salida (TP/SL) en el panel de abajo.",
                         "success"
                     )
-                    
+
                     st.rerun()
                 except ValueError as ve:
                     # Error de validación de negocio (ej. strikes no existen)
@@ -468,6 +606,71 @@ with tabs[1]:
                         ev['precio_actual'], ev['tasa_riesgo'], ev['volatilidad'], dias_venc, ev['strikes']
                     )
                     st.pyplot(fig)
+
+if st.session_state.get('orden_pendiente_monitor'):
+    with tabs[1]:
+        opm = st.session_state['orden_pendiente_monitor']
+        st.divider()
+        st.subheader("🎯 Configurar Monitor de Salida (Take Profit / Stop Loss)")
+        st.write(
+            f"Orden **#{opm['order_id']}** enviada. Configura los umbrales de salida "
+            f"para que el Watchdog cierre automáticamente la posición de **{opm['ticker']}**."
+        )
+
+        col_tp_f, col_sl_f, col_cr_f = st.columns(3)
+
+        credito_mon = col_cr_f.number_input(
+            "Crédito inicial cobrado ($)",
+            min_value=0.0,
+            value=float(round(opm['credito'] * 100, 2)),
+            step=10.0,
+            key="mon_credito_inline",
+            help="Prima total: crédito/acción × 100. Pre-rellenado automáticamente."
+        )
+        pct_tp_mon = col_tp_f.number_input(
+            "Take Profit (%)",
+            min_value=0.1,
+            value=50.0,
+            step=5.0,
+            key="mon_pct_tp_inline"
+        )
+        pct_sl_mon = col_sl_f.number_input(
+            "Stop Loss (%)",
+            min_value=0.1,
+            value=200.0,
+            step=25.0,
+            key="mon_pct_sl_inline"
+        )
+
+        tp_prev = round((pct_tp_mon / 100.0) * credito_mon, 2)
+        sl_prev = round((pct_sl_mon / 100.0) * credito_mon, 2)
+        st.info(f"📐 Con estos parámetros: **TP** al ganar **+`${tp_prev}** · **SL** al perder **-`${sl_prev}**")
+
+        col_act, col_skip = st.columns([2, 1])
+        if col_act.button("▶ Activar Monitor de Salida", type="primary", key="btn_activar_monitor_inline"):
+            estado_mon = obtener_estado_monitor()
+            estado_mon["activo"]          = True
+            estado_mon["ticker"]          = opm['ticker']
+            estado_mon["vencimiento"]     = opm['vencimiento']
+            estado_mon["strikes"]         = opm['strikes']
+            estado_mon["credito_inicial"] = credito_mon
+            estado_mon["pct_tp"]          = float(pct_tp_mon)
+            estado_mon["pct_sl"]          = float(pct_sl_mon)
+            estado_mon["pnl_actual"]      = None
+            estado_mon["ultimo_evento"]   = None
+
+            db.registrar_evento("MONITOR_ACTIVADO", f"Ticker:{opm['ticker']} | OrderId:{opm['order_id']} | Crédito:`${credito_mon} | TP:{pct_tp_mon}% | SL:{pct_sl_mon}%")
+            enviar_alerta_webhook(
+                "🎯 Monitor de Salida Activado",
+                f"**Ticker:** {opm['ticker']} · **OrderId:** {opm['order_id']}\n**Crédito cobrado:** `${credito_mon}\n**Take Profit:** {pct_tp_mon}% → cerrar al ganar +`${tp_prev}\n**Stop Loss:** {pct_sl_mon}% → cerrar al perder -`${sl_prev}\nMonitorización activa cada 15 segundos.",
+                "info"
+            )
+            del st.session_state['orden_pendiente_monitor']
+            st.rerun()
+
+        if col_skip.button("⏩ Omitir (sin monitor)", key="btn_skip_monitor_inline"):
+            del st.session_state['orden_pendiente_monitor']
+            st.rerun()
 
 with tabs[0]:
     st.header("Resumen de la Cuenta (Paper Trading)")
@@ -685,6 +888,50 @@ with tabs[2]:
 
     else:
         st.info("📦 Aún no se han ejecutado órdenes en esta sesión. Las órdenes BAG enviadas al bróker aparecerán aquí.")
+
+    st.divider()
+    st.subheader("🎯 Estado del Monitor de Salida (TP/SL)")
+
+    estado_monitor = obtener_estado_monitor()
+    activo   = estado_monitor["activo"]
+    pnl_disp = estado_monitor["pnl_actual"]
+    ult_ev   = estado_monitor["ultimo_evento"]
+
+    if activo:
+        estado_txt  = "🟢 ACTIVO"
+        estado_help = "El Watchdog está monitorizando la posición cada 15 segundos."
+    elif ult_ev == "TAKE_PROFIT":
+        estado_txt  = "✅ CERRADO (Take Profit)"
+        estado_help = "El monitor ejecutó el cierre automático por Take Profit."
+    elif ult_ev == "STOP_LOSS":
+        estado_txt  = "🛑 CERRADO (Stop Loss)"
+        estado_help = "El monitor ejecutó el cierre automático por Stop Loss."
+    else:
+        estado_txt  = "⚫ INACTIVO"
+        estado_help = "Sin monitor activo. Actívalo en \"Nueva Estrategia\" tras enviar una orden."
+
+    col_ms1, col_ms2, col_ms3 = st.columns(3)
+    col_ms1.metric(label="Estado del Monitor", value=estado_txt, help=estado_help)
+
+    if activo or ult_ev:
+        tp_usd = round((estado_monitor["pct_tp"] / 100.0) * estado_monitor["credito_inicial"], 2)
+        sl_usd = round(-(estado_monitor["pct_sl"] / 100.0) * estado_monitor["credito_inicial"], 2)
+        col_ms2.metric(label=f"Umbral TP ({estado_monitor['pct_tp']}%)", value=f"+`${tp_usd}")
+        col_ms3.metric(label=f"Umbral SL ({estado_monitor['pct_sl']}%)", value=f"`${sl_usd}", delta_color="inverse")
+
+    if pnl_disp is not None:
+        st.metric(label=f"P&L Actual — {estado_monitor['ticker']} (IBKR)", value=f"`${pnl_disp}", delta=f"`${pnl_disp}", delta_color="normal")
+
+    if activo:
+        st.write(f"**Posición monitorizada:** `{estado_monitor['ticker']}` · Venc: `{estado_monitor['vencimiento']}` · Strikes: `{estado_monitor['strikes']}`")
+        if st.button("⏹ Detener Monitor", key="btn_detener_monitor"):
+            estado_monitor["activo"]       = False
+            estado_monitor["ultimo_evento"] = None
+            db.registrar_evento("MONITOR_DETENIDO", f"El operador ha detenido manualmente el Monitor de Salida para {estado_monitor['ticker']}.")
+            enviar_alerta_webhook("⏹ Monitor de Salida Detenido", f"El operador ha detenido manualmente el Watchdog de Salida para **{estado_monitor['ticker']}**. La posición NO ha sido cerrada.", "warning")
+            st.rerun()
+    elif not ult_ev:
+        st.info("💡 Para activar el monitor, envía una orden en **Nueva Estrategia** y configura el TP/SL justo después.")
 
 with tabs[3]:
     st.header("🧪 Backtesting Visual (Data Science)")

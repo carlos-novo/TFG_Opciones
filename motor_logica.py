@@ -86,3 +86,67 @@ class MotorEstrategias:
             "valor_sma": round(sma_actual, 2),
             "precio_evaluado": precio_actual
         }
+
+
+class MotorSalida:
+    """
+    Motor de salida algorítmica para posiciones Iron Condor.
+
+    Evalúa si la posición debe cerrarse (Take Profit o Stop Loss) a partir
+    del P&L no realizado actual y los umbrales configurados por el operador.
+
+    Los umbrales se expresan como porcentaje del crédito inicial cobrado,
+    que es el estándar de la industria para la gestión de Iron Condors:
+      - TP al 50%: cerrar cuando la ganancia equivale al 50% de la prima cobrada.
+      - SL al 200%: cerrar cuando la pérdida supera el doble de la prima cobrada.
+
+    Esta clase no depende de ninguna conexión a IBKR ni de la base de datos,
+    lo que permite testearla de forma completamente determinista.
+    """
+
+    @staticmethod
+    def evaluar_condicion_salida(
+        pnl_actual: float,
+        credito_inicial: float,
+        pct_tp: float,
+        pct_sl: float
+    ) -> dict:
+        """
+        Decide si se debe cerrar la posición basándose en el P&L actual.
+
+        Args:
+            pnl_actual:      P&L no realizado actual en dólares.
+                             Positivo = ganamos, negativo = perdemos.
+            credito_inicial: Prima total cobrada al abrir la posición (en dólares).
+                             Ej: crédito de 5.90$/acción × 100 acciones = 590$.
+            pct_tp:          Porcentaje de recuperación de prima para TP (0-100).
+                             Ej: 50 → cerrar cuando ganamos ≥ 50% de la prima cobrada.
+            pct_sl:          Porcentaje de pérdida sobre prima para SL (0-300).
+                             Ej: 200 → cerrar cuando perdemos ≥ 200% de la prima cobrada.
+
+        Returns:
+            dict con claves:
+              - 'accion':        'TAKE_PROFIT' | 'STOP_LOSS' | 'MANTENER'
+              - 'umbral_tp_usd': Umbral de TP en dólares (positivo).
+              - 'umbral_sl_usd': Umbral de SL en dólares (negativo).
+              - 'pnl_actual':    P&L actual redondeado a 2 decimales.
+        """
+        # Umbral TP: la ganancia mínima que justifica el cierre (positivo)
+        umbral_tp = (pct_tp / 100.0) * credito_inicial
+
+        # Umbral SL: la pérdida máxima tolerable antes del cierre (negativo)
+        umbral_sl = -(pct_sl / 100.0) * credito_inicial
+
+        if pnl_actual >= umbral_tp:
+            accion = 'TAKE_PROFIT'
+        elif pnl_actual <= umbral_sl:
+            accion = 'STOP_LOSS'
+        else:
+            accion = 'MANTENER'
+
+        return {
+            'accion':        accion,
+            'umbral_tp_usd': round(umbral_tp, 2),
+            'umbral_sl_usd': round(umbral_sl, 2),
+            'pnl_actual':    round(pnl_actual, 2),
+        }

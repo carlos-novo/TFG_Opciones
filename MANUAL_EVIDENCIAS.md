@@ -94,7 +94,20 @@ En el instante exacto del envío, un módulo asíncrono realiza una petición PO
 
 ---
 
-## Paso 6: Tolerancia a Fallos de Red y Resiliencia (Watchdog)
+## Paso 6: Motor de Salida Automática y Gestión del Riesgo (TP/SL)
+Para garantizar una gestión del riesgo autónoma, el sistema incorpora un *Watchdog* de salida que supervisa en tiempo real la rentabilidad (P&L) de la estrategia abierta. 
+
+Tras confirmar el envío de una orden, la plataforma despliega un formulario dinámico que permite definir de manera flexible los umbrales de **Take Profit (TP)** y **Stop Loss (SL)** en formato porcentual sobre el crédito inicial cobrado. Al activar el monitor, un hilo asíncrono en segundo plano consulta cíclicamente a Interactive Brokers. Si el P&L sobrepasa los umbrales definidos, el motor ensambla y transmite una orden BAG inversa para cerrar atómicamente la posición y asegurar las ganancias o limitar las pérdidas.
+
+Esta operativa se notifica inmediatamente a través del sistema de telemetría de Discord, indicando tanto el valor absoluto del P&L de cierre como su porcentaje respecto al crédito inicial.
+
+![Activación del Monitor TP/SL tras enviar una orden](figures/fig_monitor_activacion.png)
+![Panel de Estado del Monitor Activo en Tiempo Real](figures/fig_monitor_estado_cierre.png)
+![Secuencia de Webhooks de Discord (Orden, Activación y Cierre)](figures/fig_monitor_webhook.png)
+
+---
+
+## Paso 7: Tolerancia a Fallos de Red y Resiliencia (Watchdog)
 
 ### A. Detección y Encolamiento local
 Ante una caída en la conexión de red o una parada inesperada del Gateway del bróker, el sistema activa su mecanismo de tolerancia a fallos. 
@@ -112,7 +125,7 @@ Al detectar que la conexión de red o el socket del bróker vuelve a estar activ
 
 ---
 
-## Paso 7: Auditoría Permanente y Trazabilidad
+## Paso 8: Auditoría Permanente y Trazabilidad
 Para cumplir con los estándares de auditoría de los sistemas telemáticos transaccionales, cada evento relevante (logins exitosos, accesos bloqueados, bloqueos por reglas técnicas de SMA, envíos de órdenes y cancelaciones) es registrado de manera persistente con marcas de tiempo en formato UNIX. 
 
 El panel de monitorización permite al administrador consultar estos históricos e interactuar directamente con ellos (ej. descargar los reportes consolidados en formato CSV para su análisis externo o solicitar cancelaciones activas de órdenes pendientes).
@@ -122,7 +135,7 @@ El panel de monitorización permite al administrador consultar estos históricos
 
 ---
 
-## Paso 8: Capa de Interoperabilidad (API REST Cibersegura)
+## Paso 9: Capa de Interoperabilidad (API REST Cibersegura)
 El sistema desacopla el frontend del backend mediante un microservicio construido con **FastAPI**. Sin embargo, la exposición pública de datos de auditoría de mercado representa un riesgo de seguridad elevado. 
 
 Por ello, se implementó un flujo estándar **OAuth2** con tokens **JWT** firmados criptográficamente. Al acceder a la interfaz de documentación interactiva Swagger UI, todos los recursos y operaciones REST (`/operaciones`, `/auditoria`, `/cola-reintentos`) muestran un icono de candado que bloquea la respuesta HTTP con un código `401 Unauthorized` a menos que el cliente se autentique proporcionando un token válido expedido por el endpoint `/token`.
@@ -131,7 +144,7 @@ Por ello, se implementó un flujo estándar **OAuth2** con tokens **JWT** firmad
 
 ---
 
-## Paso 9: Aseguramiento de Calidad (QA) y Despliegue (DevOps)
+## Paso 10: Aseguramiento de Calidad (QA) y Despliegue (DevOps)
 
 ### A. Pruebas Unitarias (`pytest`)
 Con el objetivo de certificar el rigor científico del software y la precisión matemática del cálculo de derivadas financieras y regresiones del motor algorítmico, el repositorio incluye una suite automatizada de pruebas unitarias basadas en `pytest`. 

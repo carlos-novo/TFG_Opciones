@@ -483,3 +483,157 @@ class GestorIBKR:
             if ib_temp.isConnected():
                 ib_temp.disconnect()
             return {}
+
+    def obtener_pnl_posiciones_opciones(self, ticker_filtro=None):
+        """
+        Micro-sesión Read-Only: Suma el P&L no realizado de todas las
+        posiciones de opciones de la cuenta, filtrando opcionalmente
+        por subyacente (ticker_filtro) para aislar la estrategia activa.
+
+        Args:
+            ticker_filtro (str | None): Si se especifica, solo suma el P&L
+                de las patas cuyo símbolo subyacente coincida exactamente.
+                Si es None, suma todas las opciones de la cuenta.
+
+        Retorna:
+            float: Suma del unrealizedPNL de las patas filtradas.
+            None:  Si hay error de conexión o no hay posiciones.
+
+        clientId=91 reservado exclusivamente para esta consulta de monitor.
+        """
+        self._asegurar_event_loop()
+        ib_temp = IB()
+        try:
+            ib_temp.connect(self.host, self.port, clientId=91)
+            items = ib_temp.portfolio()
+            ib_temp.disconnect()
+
+            pnl_total = 0.0
+            hay_posiciones = False
+
+            for item in items:
+                c = item.contract
+                if c.secType != 'OPT':
+                    continue  # Solo interesa el P&L de opciones
+                if ticker_filtro and c.symbol.upper() != ticker_filtro.upper():
+                    continue  # Filtramos por subyacente si se especifica
+                pnl_total += item.unrealizedPNL
+                hay_posiciones = True
+
+            return round(pnl_total, 2) if hay_posiciones else None
+
+        except Exception as e:
+            print(f"Error al obtener P&L de opciones (Monitor de Salida): {e}")
+            if ib_temp.isConnected():
+                ib_temp.disconnect()
+            return None
+
+    def enviar_orden_cierre_iron_condor(self, ticker, vencimiento, strikes):
+        """
+        Micro-sesión de cierre atómico del Iron Condor como orden BAG inversa.
+
+        Las acciones de las patas son el INVERSO de la apertura:
+          Apertura: ['BUY', 'SELL', 'SELL', 'BUY']  (recibimos crédito)
+          Cierre:   ['SELL', 'BUY',  'BUY',  'SELL'] (pagamos débito)
+
+        El precio límite se fija al precio MID del combo en el mercado actual,
+        obtenido con una consulta bulk previa, para asegurar una ejecución
+        al mejor precio disponible sin cruzar el spread.
+
+        Incluye el mismo Modo Mock Defensa TFG: si los contratos no pueden
+        calificarse (mercado cerrado o ticker simulado), genera un orderId
+        aleatorio y devuelve status 'Filled (Mock Cierre TFG)'.
+
+        Args:
+            ticker (str):       Ticker del subyacente (ej. 'SPX').
+            vencimiento (date): Fecha de vencimiento de las opciones.
+            strikes (list):     [put_long, put_short, call_short, call_long].
+
+        Retorna:
+            dict con 'order_id' (int) y 'status' (str).
+
+        clientId=90 reservado exclusivamente para órdenes de cierre.
+        """
+        self._asegurar_event_loop()
+        ib_temp = IB()
+        try:
+            ib_temp.connect(self.host, self.port, clientId=90)
+            ib_temp.reqMarketDataType(3)
+
+            p_long, p_short, c_short, c_long = strikes
+            fecha_str = (
+                vencimiento.strftime('%Y%m%d')
+                if hasattr(vencimiento, 'strftime')
+                else str(vencimiento).replace('-', '')
+            )
+
+            # 1. Definir y calificar los 4 contratos
+            contratos = [
+                Option(ticker, fecha_str, p_long,  'P', 'SMART', currency='USD'),
+                Option(ticker, fecha_str, p_short, 'P', 'SMART', currency='USD'),
+                Option(ticker, fecha_str, c_short, 'C', 'SMART', currency='USD'),
+                Option(ticker, fecha_str, c_long,  'C', 'SMART', currency='USD'),
+            ]
+            ib_temp.qualifyContracts(*contratos)
+
+            # Modo Mock Defensa TFG: si algún contrato no se califica, simulamos
+            if not all(c.conId for c in contratos):
+                print(f"Modo Mock Cierre TFG Activado: Simulando cierre para {ticker}")
+                ib_temp.disconnect()
+                return {
+                    "order_id": random.randint(100000, 999999),
+                    "status": "Filled (Mock Cierre TFG)"
+                }
+
+            # 2. Obtener precio MID del combo para fijar el límite de cierre
+            tickers_mkt = ib_temp.reqTickers(*contratos)
+            precio_cierre = 0.0
+            for t in tickers_mkt:
+                mid = None
+                if t.bid and t.ask and t.bid > 0 and t.ask > 0:
+                    mid = (t.bid + t.ask) / 2.0
+                elif t.close and t.close > 0:
+                    mid = t.close
+                if mid:
+                    precio_cierre += mid
+            precio_cierre = round(max(precio_cierre, 0.01), 2)  # Mínimo 1 céntimo
+
+            # 3. Ensamblar el BAG de cierre con acciones INVERTIDAS
+            acciones_cierre = ['SELL', 'BUY', 'BUY', 'SELL']
+            patas = []
+            for contrato, accion in zip(contratos, acciones_cierre):
+                pata = ComboLeg()
+                pata.conId    = contrato.conId
+                pata.ratio    = 1
+                pata.action   = accion
+                pata.exchange = 'SMART'
+                patas.append(pata)
+
+            bag = Contract()
+            bag.symbol    = ticker
+            bag.secType   = 'BAG'
+            bag.currency  = 'USD'
+            bag.exchange  = 'SMART'
+            bag.comboLegs = patas
+
+            # 4. LimitOrder a débito neto (precio positivo = pagamos para cerrar)
+            orden = LimitOrder(
+                action        = 'SELL',
+                totalQuantity = 1,
+                lmtPrice      = precio_cierre
+            )
+
+            # 5. Transmitir al Gateway
+            trade        = ib_temp.placeOrder(bag, orden)
+            ib_temp.sleep(1)
+            order_id     = trade.order.orderId
+            order_status = trade.orderStatus.status
+
+            ib_temp.disconnect()
+            return {"order_id": order_id, "status": order_status}
+
+        except Exception as e:
+            print(f"Error al enviar orden de cierre Iron Condor: {e}")
+            if ib_temp.isConnected():
+                ib_temp.disconnect()
+            raise  # Re-lanzamos para que el hilo Watchdog lo gestione

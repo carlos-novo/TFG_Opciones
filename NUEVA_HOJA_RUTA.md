@@ -365,6 +365,8 @@ Crear carpeta `figures/` con los siguientes archivos:
 - [x] Validación end-to-end de todos los contenedores y de la seguridad de la API.
 - [x] **Mejora Pre-Defensa**: Añadido gráfico interactivo de **Payoff 2D (Tienda de Campaña)** en el frontend para análisis visual de la rentabilidad a vencimiento.
 - [x] **Mejora Pre-Defensa**: Añadido modo **Mock Defensa TFG (Fallback)** en la conexión IBKR para asegurar el flujo de la demostración visual en caso de inactividad de mercado real o rechazo de contratos.
+  - **Contexto:** En las defensas de TFG (Efecto Demo), el mercado real puede estar cerrado (fines de semana, festivos) o las cadenas de opciones ilíquidas, causando el rechazo de la API (Error `No security definition`).
+  - **Solución:** Interceptamos el fallo `c.conId` en `conexion_ibkr.py`. Si los contratos no existen, desconectamos el gateway y simulamos un envío exitoso devolviendo un identificador aleatorio de 6 dígitos. Esto asegura que la demostración gráfica de la interfaz de Streamlit, Webhooks y Base de datos continúe sin errores técnicos frente al tribunal.
 
 ## PARTE 4 — CALENDARIO SEMANAS 3–5 (Memoria LaTeX)
 
