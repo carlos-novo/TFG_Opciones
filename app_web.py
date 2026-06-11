@@ -444,7 +444,7 @@ conectado = st.session_state.broker.esta_conectado()
 color_est = "🟢" if conectado else "🔴"
 texto_est = "Conectado" if conectado else "Desconectado"
 
-col_logo, col_cot, col_conn, col_logout = st.columns([5, 2, 2.5, 1.5], vertical_alignment="center")
+col_logo, col_cot, col_conn, col_logout = st.columns([7.2, 1.2, 1.5, 1.1], vertical_alignment="center")
 
 with col_logo:
     st.markdown("<h2 style='margin:0; font-size:1.8rem; line-height:1.2;'>🏛️ Plataforma Algorítmica Multileg</h2>", unsafe_allow_html=True)
@@ -455,7 +455,7 @@ with col_cot:
         mostrar_dialogo_cotizacion()
 
 with col_conn:
-    if st.button(f"{color_est} Gateway: {texto_est}", use_container_width=True, key="btn_top_conn"):
+    if st.button(f"{color_est} {texto_est}", use_container_width=True, key="btn_top_conn"):
         if conectado:
             st.session_state.broker.desconectar()
         else:
