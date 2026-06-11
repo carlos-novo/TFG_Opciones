@@ -486,7 +486,7 @@ with st.container(key="top_toolbar_container"):
 
 st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
 
-tabs = st.tabs(["📊 Dashboard", "⚙️ Acciones", "📐 Opciones", "📈 Control Room"])
+tabs = st.tabs(["Dashboard", "Acciones", "Opciones", "Control Room"])
 
 # ==========================================
 # TAB 1: DASHBOARD
