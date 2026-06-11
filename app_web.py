@@ -387,24 +387,25 @@ if 'autenticado' not in st.session_state:
 
 # --- BARRERA DE ENTRADA (LOGIN) ---
 if not st.session_state['autenticado']:
-    col1, col2, col3 = st.columns([1, 1.2, 1], key="login_columns")
-    with col2:
-        st.markdown("<br><br><br>", unsafe_allow_html=True)
-        st.markdown("<h2 style='text-align: center;'>🔒 Consola Algorítmica TFG</h2>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align: center; color: #94a3b8;'>Introduce tus credenciales para acceder a la plataforma multileg.</p>", unsafe_allow_html=True)
-        
-        with st.form("login_form"):
-            user_input = st.text_input("Usuario")
-            pass_input = st.text_input("Contraseña", type="password")
-            submit_login = st.form_submit_button("Iniciar Sesión")
+    with st.container(key="login_container"):
+        col1, col2, col3 = st.columns([1, 1.2, 1])
+        with col2:
+            st.markdown("<br><br><br>", unsafe_allow_html=True)
+            st.markdown("<h2 style='text-align: center;'>🔒 Consola Algorítmica TFG</h2>", unsafe_allow_html=True)
+            st.markdown("<p style='text-align: center; color: #94a3b8;'>Introduce tus credenciales para acceder a la plataforma multileg.</p>", unsafe_allow_html=True)
             
-            if submit_login:
-                if verificar_credenciales(user_input, pass_input):
-                    st.session_state['autenticado'] = True
-                    db.registrar_evento("LOGIN_EXITOSO", f"Usuario '{user_input}' ha accedido al sistema.")
-                    st.rerun()
-                else:
-                    st.error("Credenciales incorrectas. Acceso denegado.")
+            with st.form("login_form"):
+                user_input = st.text_input("Usuario")
+                pass_input = st.text_input("Contraseña", type="password")
+                submit_login = st.form_submit_button("Iniciar Sesión")
+                
+                if submit_login:
+                    if verificar_credenciales(user_input, pass_input):
+                        st.session_state['autenticado'] = True
+                        db.registrar_evento("LOGIN_EXITOSO", f"Usuario '{user_input}' ha accedido al sistema.")
+                        st.rerun()
+                    else:
+                        st.error("Credenciales incorrectas. Acceso denegado.")
     st.stop()
 
 # --- APLICACIÓN PRINCIPAL (AUTENTICADO) ---
@@ -444,30 +445,31 @@ conectado = st.session_state.broker.esta_conectado()
 color_est = "🟢" if conectado else "🔴"
 texto_est = "Conectado" if conectado else "Desconectado"
 
-col_logo, col_cot, col_conn, col_logout = st.columns([7.2, 1.2, 1.5, 1.1], vertical_alignment="center", key="top_toolbar_columns")
+with st.container(key="top_toolbar_container"):
+    col_logo, col_cot, col_conn, col_logout = st.columns([7.2, 1.2, 1.5, 1.1], vertical_alignment="center")
 
-with col_logo:
-    st.markdown("<h2 style='margin:0; font-size:1.8rem; line-height:1.2;'>🏛️ Plataforma Algorítmica Multileg</h2>", unsafe_allow_html=True)
-    st.markdown("<p style='color: #94a3b8; font-size: 0.9rem; margin:0;'>Watchdogs en segundo plano, sensibilidades Black-Scholes y gestión de riesgo</p>", unsafe_allow_html=True)
+    with col_logo:
+        st.markdown("<h2 style='margin:0; font-size:1.8rem; line-height:1.2;'>🏛️ Plataforma Algorítmica Multileg</h2>", unsafe_allow_html=True)
+        st.markdown("<p style='color: #94a3b8; font-size: 0.9rem; margin:0;'>Watchdogs en segundo plano, sensibilidades Black-Scholes y gestión de riesgo</p>", unsafe_allow_html=True)
 
-with col_cot:
-    if st.button("Probar Ticker", use_container_width=True, key="btn_top_cot"):
-        mostrar_dialogo_cotizacion()
+    with col_cot:
+        if st.button("Probar Ticker", use_container_width=True, key="btn_top_cot"):
+            mostrar_dialogo_cotizacion()
 
-with col_conn:
-    if st.button(f"{color_est} {texto_est}", use_container_width=True, key="btn_top_conn"):
-        if conectado:
-            st.session_state.broker.desconectar()
-        else:
-            st.session_state.broker.conectar()
-        st.rerun()
+    with col_conn:
+        if st.button(f"{color_est} {texto_est}", use_container_width=True, key="btn_top_conn"):
+            if conectado:
+                st.session_state.broker.desconectar()
+            else:
+                st.session_state.broker.conectar()
+            st.rerun()
 
-with col_logout:
-    if st.button("Salir", use_container_width=True, key="btn_top_logout"):
-        st.session_state['autenticado'] = False
-        if st.session_state.broker.esta_conectado():
-            st.session_state.broker.desconectar()
-        st.rerun()
+    with col_logout:
+        if st.button("Salir", use_container_width=True, key="btn_top_logout"):
+            st.session_state['autenticado'] = False
+            if st.session_state.broker.esta_conectado():
+                st.session_state.broker.desconectar()
+            st.rerun()
 
 st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
 
