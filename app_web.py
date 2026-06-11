@@ -157,7 +157,8 @@ st.markdown("""
     
     /* Accent Buttons */
     div.stButton > button,
-    div.stFormSubmitButton > button {
+    div.stFormSubmitButton > button,
+    div.stDownloadButton > button {
         background: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%);
         color: white;
         border: none;
@@ -168,14 +169,16 @@ st.markdown("""
         transition: all 0.2s ease;
     }
     div.stButton > button:hover,
-    div.stFormSubmitButton > button:hover {
+    div.stFormSubmitButton > button:hover,
+    div.stDownloadButton > button:hover {
         transform: translateY(-1px);
         box-shadow: 0 6px 20px rgba(79, 70, 229, 0.6);
         background: linear-gradient(135deg, #5a52e6 0%, #4c8ff7 100%);
         color: white;
     }
     div.stButton > button:active,
-    div.stFormSubmitButton > button:active {
+    div.stFormSubmitButton > button:active,
+    div.stDownloadButton > button:active {
         transform: translateY(1px);
     }
     
@@ -362,6 +365,7 @@ st.markdown("""
     }
     div[data-testid="stHorizontalBlock"] > div:nth-child(7) button:hover * {
         color: #ffffff !important;
+    }
 
     /* Custom Strategy Card Container */
     div[class*="st-key-strategy_card_"] {
@@ -384,6 +388,25 @@ st.markdown("""
     div.stFormSubmitButton > button {
         width: 100% !important;
     }
+
+    /* Align manual close buttons to the right */
+    div[class*="st-key-cierre_man_"],
+    div[class*="st-key-cierre_man_"] div.stButton {
+        width: 100% !important;
+        display: flex !important;
+        justify-content: flex-end !important;
+    }
+    div[class*="st-key-cierre_man_"] button {
+        width: auto !important;
+    }
+
+    /* Logo Title Gradient Override */
+    div[data-testid="stMarkdownContainer"] h1.logo-title {
+        background: linear-gradient(135deg, #6366f1 0%, #3b82f6 100%) !important;
+        -webkit-background-clip: text !important;
+        -webkit-text-fill-color: transparent !important;
+        color: transparent !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -399,12 +422,13 @@ if 'autenticado' not in st.session_state:
     st.session_state['autenticado'] = False
 
 # --- BARRERA DE ENTRADA (LOGIN) ---
+login_placeholder = st.empty()
 if not st.session_state['autenticado']:
-    with st.container(key="login_container"):
+    with login_placeholder.container(key="login_container"):
         col1, col2, col3 = st.columns([1, 1.2, 1])
         with col2:
             st.markdown("<br><br><br>", unsafe_allow_html=True)
-            st.markdown("<h2 style='text-align: center; color: #6366f1; font-weight: 700; margin-bottom: 10px;'>Consola Algorítmica TFG</h2>", unsafe_allow_html=True)
+            st.markdown("<h2 style='text-align: center; color: #6366f1; font-weight: 700; margin-bottom: 10px;'>Plataforma Algorítmica Multileg</h2>", unsafe_allow_html=True)
             st.markdown("<p style='text-align: center; color: #94a3b8;'>Introduce tus credenciales para acceder a la plataforma multileg.</p>", unsafe_allow_html=True)
             
             with st.form("login_form"):
@@ -468,11 +492,20 @@ with st.container(key="top_toolbar_container"):
     col_logo, col_cot, col_conn, col_logout = st.columns([7.2, 1.2, 1.5, 1.1], vertical_alignment="center")
 
     with col_logo:
-        st.markdown("<h2 style='margin:0; font-size:1.8rem; line-height:1.2;'>🏛️ Plataforma Algorítmica Multileg</h2>", unsafe_allow_html=True)
-        st.markdown("<p style='color: #94a3b8; font-size: 0.9rem; margin:0;'>Watchdogs en segundo plano, sensibilidades Black-Scholes y gestión de riesgo</p>", unsafe_allow_html=True)
+        st.markdown("""
+        <h1 style='margin:0; font-size:2.5rem; font-weight:800; font-family:"Outfit", sans-serif;
+                   background: linear-gradient(135deg, #6366f1 0%, #3b82f6 100%);
+                   -webkit-background-clip: text; -webkit-text-fill-color: #6366f1;
+                   letter-spacing:-0.03em; line-height:1.1;'>
+            Plataforma Algorítmica Multileg
+        </h1>
+        <p style='color: #94a3b8; font-size: 0.95rem; margin-top: 4px; margin-bottom: 0;'>
+            Watchdogs en segundo plano, sensibilidades Black-Scholes y gestión de riesgo
+        </p>
+        """, unsafe_allow_html=True)
 
     with col_cot:
-        if st.button("Probar Ticker", use_container_width=True, key="btn_top_cot"):
+        if st.button("Consultar Precio", use_container_width=True, key="btn_top_cot"):
             mostrar_dialogo_cotizacion()
 
     with col_conn:
@@ -484,7 +517,7 @@ with st.container(key="top_toolbar_container"):
             st.rerun()
 
     with col_logout:
-        if st.button("Salir", use_container_width=True, key="btn_top_logout"):
+        if st.button("Cerrar Sesión", use_container_width=True, key="btn_top_logout"):
             st.session_state['autenticado'] = False
             if st.session_state.broker.esta_conectado():
                 st.session_state.broker.desconectar()
@@ -502,8 +535,13 @@ with tabs[0]:
     
     # 1. Indicadores Financieros
     if conectado:
-        with st.spinner("Sincronizando cuenta con IBKR..."):
-            datos_cuenta = st.session_state.broker.obtener_resumen_cuenta()
+        now = time.time()
+        last_summary_fetch = st.session_state.get('last_summary_fetch_time', 0)
+        if st.session_state.get('datos_cuenta') is None or (now - last_summary_fetch) >= 14:
+            with st.spinner("Sincronizando cuenta con IBKR..."):
+                st.session_state['datos_cuenta'] = st.session_state.broker.obtener_resumen_cuenta()
+                st.session_state['last_summary_fetch_time'] = now
+        datos_cuenta = st.session_state.get('datos_cuenta')
         if datos_cuenta:
             net_liq = float(datos_cuenta['NetLiquidation'])
             buying_power = float(datos_cuenta['BuyingPower'])
@@ -523,7 +561,7 @@ with tabs[0]:
     st.divider()
     
     # 2. Posiciones Abiertas
-    st.subheader("📂 Posiciones Abiertas en Cartera")
+    st.subheader("Posiciones Abiertas en Cartera")
     st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Monitoreo directo del portafolio actual del bróker.</p>", unsafe_allow_html=True)
     
     @st.fragment(run_every=15)
@@ -531,9 +569,13 @@ with tabs[0]:
         col_ref, _ = st.columns([1, 4])
         actualizar = col_ref.button("🔄 Actualizar Cartera", key="btn_act_pos")
         
+        now = time.time()
+        last_fetch = st.session_state.get('last_portfolio_fetch_time', 0)
+        
         if conectado:
-            # Siempre consultamos las últimas posiciones en cada autorefresh de 15s si está conectado
-            st.session_state['posiciones_cartera'] = st.session_state.broker.obtener_posiciones_cartera()
+            if actualizar or st.session_state.get('posiciones_cartera') is None or (now - last_fetch) >= 14:
+                st.session_state['posiciones_cartera'] = st.session_state.broker.obtener_posiciones_cartera()
+                st.session_state['last_portfolio_fetch_time'] = now
         else:
             if actualizar or st.session_state.get('posiciones_cartera') is None:
                 st.session_state['posiciones_cartera'] = [
@@ -548,6 +590,10 @@ with tabs[0]:
             st.success("✅ Sin posiciones abiertas en la cuenta. La cartera está 100% en efectivo.")
         else:
             df_pos = pd.DataFrame(posiciones)
+            # Evitamos que PyArrow falle por tipos mixtos (ej. Strike con '—' y float)
+            for col in ["Strike", "Vencimiento", "Right (C/P)"]:
+                if col in df_pos.columns:
+                    df_pos[col] = df_pos[col].map(lambda x: "—" if (x is None or pd.isna(x) or str(x).strip() == "" or x == "—") else str(x))
             st.dataframe(df_pos, width="stretch", hide_index=True)
             
     render_posiciones_cartera()
@@ -953,7 +999,7 @@ with tabs[2]:
     # --- GRÁFICO INTERACTIVO DE PLOTLY (SENSIVILIDAD Y VALOR TEMPORAL) ---
     if st.session_state["patas_opciones"]:
         st.divider()
-        st.subheader("📊 Análisis de Sensibilidad Teórico (Black-Scholes)")
+        st.subheader("Análisis de Sensibilidad Teórico (Black-Scholes)")
         st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Mueve los deslizadores para ver el efecto del paso del tiempo y la volatilidad implícita en la curva teórica.</p>", unsafe_allow_html=True)
         
         c_sl1, c_sl2, c_sl3 = st.columns(3)
@@ -1153,7 +1199,7 @@ with tabs[2]:
             theta_net += sign * g["theta"] * qty * 100
             vega_net += sign * g["vega"] * qty * 100
             
-        st.markdown(f"##### 📐 Greeks Teóricos Estimados (Evaluados a ${precio_medio_k:.2f})")
+        st.markdown(f"##### Greeks Teóricos Estimados (Evaluados a ${precio_medio_k:.2f})")
         col_g1, col_g2, col_g3 = st.columns(3)
         col_g1.metric("Delta Neto de Cartera (Δ)", f"{delta_net:.2f}", help="Sensibilidad respecto al precio del subyacente")
         col_g2.metric("Theta Neto Diario (Θ)", f"${theta_net:.2f}", help="Decaimiento temporal diario de la posición")
@@ -1161,7 +1207,7 @@ with tabs[2]:
         
         # --- PARÁMETROS ALGORÍTMICOS Y ENVÍO ---
         st.divider()
-        st.subheader("🚀 Parámetros Algorítmicos y Envío")
+        st.subheader("Parámetros Algorítmicos y Envío")
         st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Configura el tipo de orden y las condiciones de entrada/salida que vigilará el Watchdog.</p>", unsafe_allow_html=True)
 
         # Tipo de orden + prima objetivo
@@ -1349,7 +1395,7 @@ with tabs[3]:
     st.header("Consola de Control Algorítmico (Control Room)")
     
     # 1. Muestra Estrategias Activas
-    st.subheader("📈 Estrategias Activas")
+    st.subheader("Estrategias Activas")
     
     @st.fragment(run_every=15)
     def render_estrategias_activas():
@@ -1358,6 +1404,28 @@ with tabs[3]:
         if not estrategias_activas:
             st.info("No hay estrategias ACTIVAS ejecutándose actualmente en el mercado.")
         else:
+            now = time.time()
+            last_pnl_fetch = st.session_state.get('last_pnl_fetch_time', 0)
+            
+            if 'cache_pnl_estrategias' not in st.session_state:
+                st.session_state['cache_pnl_estrategias'] = {}
+                
+            necesita_fetch = (now - last_pnl_fetch) >= 14 or any(est['id'] not in st.session_state['cache_pnl_estrategias'] for est in estrategias_activas)
+            
+            if conectado and necesita_fetch:
+                for est in estrategias_activas:
+                    try:
+                        pnl_val = st.session_state.broker.calcular_pnl_estrategia(
+                            ticker=est["ticker"],
+                            tipo_activo=est["tipo_activo"],
+                            patas=est["patas"]
+                        )
+                        st.session_state['cache_pnl_estrategias'][est['id']] = pnl_val
+                    except Exception as e_pnl:
+                        print(f"Error al calcular P&L para estrategia #{est['id']}: {e_pnl}")
+                        st.session_state['cache_pnl_estrategias'][est['id']] = None
+                st.session_state['last_pnl_fetch_time'] = now
+                
             # Mostramos tarjetas premium para cada estrategia activa
             for est in estrategias_activas:
                 ticker = est["ticker"]
@@ -1368,21 +1436,14 @@ with tabs[3]:
                 pnl_str = "Offline (N/A)"
                 pnl_color = "#94a3b8"  # Slate / gris
                 
-                # Intentamos obtener P&L si el broker está conectado
+                # Intentamos obtener P&L de la cache si el broker está conectado
                 if conectado:
-                    try:
-                        pnl = st.session_state.broker.calcular_pnl_estrategia(
-                            ticker=ticker,
-                            tipo_activo=tipo_activo,
-                            patas=est["patas"]
-                        )
-                        if pnl is not None:
-                            pnl_color = "#10b981" if pnl >= 0 else "#ef4444"  # Verde o Rojo
-                            pnl_str = f"${pnl:+.2f}"
-                        else:
-                            pnl_str = "Sin datos de posición"
-                    except Exception as e_pnl:
-                        pnl_str = f"Error: {e_pnl}"
+                    pnl = st.session_state['cache_pnl_estrategias'].get(est['id'])
+                    if pnl is not None:
+                        pnl_color = "#10b981" if pnl >= 0 else "#ef4444"  # Verde o Rojo
+                        pnl_str = f"${pnl:+.2f}"
+                    else:
+                        pnl_str = "Sin datos de posición"
                 
                 # Info de SL y TP
                 sl_val = condiciones_salida.get("stop_loss")
@@ -1427,7 +1488,7 @@ with tabs[3]:
                         <div style='height: 12px;'></div>
                         """, unsafe_allow_html=True)
                         
-                        if st.button(f"🛑 Cierre Forzado Manual", key=f"cierre_man_{est['id']}", use_container_width=True):
+                        if st.button(f"🛑 Cierre Forzado Manual", key=f"cierre_man_{est['id']}"):
                             with st.spinner("Enviando orden de cierre forzado manual..."):
                                 try:
                                     if conectado:
@@ -1468,7 +1529,7 @@ with tabs[3]:
     st.divider()
     
     # 2. Formulario de Mutación en Caliente (Hot-Reloading SL/TP)
-    st.subheader("🎯 Modificación de Límites en Caliente")
+    st.subheader("Modificación de Límites en Caliente")
     st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Modifica instantáneamente los umbrales de Stop Loss y Take Profit de las estrategias activas. El Watchdog cargará los nuevos valores en su próximo ciclo de evaluación.</p>", unsafe_allow_html=True)
     
     todas_estrategias = db.obtener_estrategias()
@@ -1512,7 +1573,7 @@ with tabs[3]:
     st.divider()
     
     # 3. MOCKS DE SIMULACIÓN SANDBOX (HITO 4)
-    with st.expander("🧪 Ecosistema de Pruebas Offline (TFG Sandbox Simulator)"):
+    with st.expander("Ecosistema de Pruebas Offline (TFG Sandbox Simulator)"):
         st.markdown("<p style='color:#94a3b8;'>Simula los eventos de mercado y los flujos de los Watchdogs de manera interactiva sin conexión al broker real.</p>", unsafe_allow_html=True)
         
         estrategias_todas_list = db.obtener_estrategias()
@@ -1595,33 +1656,16 @@ with tabs[3]:
     st.divider()
     
     # 4. Historial Completo y Descarga CSV
-    st.subheader("📋 Historial de Estrategias y Registro de Auditoría")
+    st.subheader("Historial de Estrategias y Registro de Auditoría")
     
     df_est_hist = db.obtener_estrategias_df()
+    if not df_est_hist.empty:
+        # Convertir columnas complejas a strings JSON para evitar errores de PyArrow
+        for col in ["patas", "condiciones_entrada", "condiciones_salida"]:
+            if col in df_est_hist.columns:
+                df_est_hist[col] = df_est_hist[col].apply(lambda x: json.dumps(x) if isinstance(x, (dict, list)) else str(x))
     df_audit_logs = db.obtener_logs(limit=100)
     
-    col_csv1, col_csv2 = st.columns(2)
-    
-    if not df_est_hist.empty:
-        csv_est = df_est_hist.to_csv(index=False).encode('utf-8')
-        col_csv1.download_button(
-            label="📥 Descargar Historial de Estrategias (CSV)",
-            data=csv_est,
-            file_name="historial_estrategias_tfg.csv",
-            mime="text/csv",
-            width="stretch"
-        )
-    
-    if not df_audit_logs.empty:
-        csv_audit = df_audit_logs.to_csv(index=False).encode('utf-8')
-        col_csv2.download_button(
-            label="📥 Descargar Logs de Auditoría (CSV)",
-            data=csv_audit,
-            file_name="logs_auditoria_tfg.csv",
-            mime="text/csv",
-            width="stretch"
-        )
-        
     # Tablas de datos
     tab_est, tab_aud = st.tabs(["Listado de Estrategias", "Registro de Auditoría (Logs)"])
     
@@ -1630,9 +1674,29 @@ with tabs[3]:
             st.info("No hay registros en el historial de estrategias.")
         else:
             st.dataframe(df_est_hist, width="stretch", hide_index=True)
+            st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
+            csv_est = df_est_hist.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Descargar Historial de Estrategias (CSV)",
+                data=csv_est,
+                file_name="historial_estrategias_tfg.csv",
+                mime="text/csv",
+                use_container_width=False,
+                key="btn_dl_est"
+            )
             
     with tab_aud:
         if df_audit_logs.empty:
             st.info("No hay eventos registrados en la auditoría.")
         else:
             st.dataframe(df_audit_logs, width="stretch", hide_index=True)
+            st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
+            csv_audit = df_audit_logs.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Descargar Logs de Auditoría (CSV)",
+                data=csv_audit,
+                file_name="logs_auditoria_tfg.csv",
+                mime="text/csv",
+                use_container_width=False,
+                key="btn_dl_aud"
+            )

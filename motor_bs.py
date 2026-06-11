@@ -1,7 +1,5 @@
 import numpy as np
 from scipy.stats import norm
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 from datetime import date
 
 class MotorBlackScholes:
@@ -152,6 +150,8 @@ class MotorBlackScholes:
                 else:
                     matriz_ratio[i, j] = 0.0
 
+        import matplotlib.pyplot as plt
+        import matplotlib.colors as mcolors
         fig, ax = plt.subplots(figsize=(7, 5))
         cmap = mcolors.LinearSegmentedColormap.from_list("rg", ["red", "yellow", "green"])
         cax = ax.matshow(matriz_ratio, cmap=cmap)
@@ -194,6 +194,7 @@ class MotorBlackScholes:
         bep_inferior = p_short - credito_neto
         bep_superior = c_short + credito_neto
         
+        import matplotlib.pyplot as plt
         plt.style.use('dark_background')
         fig, ax = plt.subplots(figsize=(8, 4))
         
