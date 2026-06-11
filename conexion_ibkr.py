@@ -121,10 +121,10 @@ class GestorIBKR:
             barras = ib_temp.reqHistoricalData(
                 contrato,
                 endDateTime='',
-                durationStr='1 D',
-                barSizeSetting='1 min',
+                durationStr='5 D',
+                barSizeSetting='1 day',
                 whatToShow='TRADES',
-                useRTH=False, 
+                useRTH=True, 
                 formatDate=1
             )
             
