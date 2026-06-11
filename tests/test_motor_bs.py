@@ -45,3 +45,23 @@ def test_calcular_greeks_put():
     """
     griegas = MotorBlackScholes.calcular_greeks(100, 100, 1, 0.05, 0.2, 'P')
     assert -1 < griegas['delta'] < 0
+
+def test_calcular_payoff_estrategia():
+    # Test con una sola pata de acción (BUY 10 acciones a 150$)
+    patas = [{"tipo_activo": "STOCK", "accion": "BUY", "cantidad": 10, "precio_entrada": 150.0}]
+    resultado = MotorBlackScholes.calcular_payoff_estrategia(patas, T=0, r=0.05, sigma=0.2, precio_min=140, precio_max=160, puntos=5)
+    
+    assert len(resultado["S"]) == 5
+    # En S=140, PnL = (140 - 150) * 10 = -100$
+    assert resultado["pnl_vencimiento"][0] == -100.0
+    # En S=160, PnL = (160 - 150) * 10 = 100$
+    assert resultado["pnl_vencimiento"][-1] == 100.0
+    
+    # Test con una opción Call comprada (BUY 1 Call strike 150 a prima 5.0$)
+    patas_opt = [{"tipo_activo": "OPTION", "accion": "BUY", "cantidad": 1, "strike": 150.0, "right": "C", "precio_entrada": 5.0}]
+    res_opt = MotorBlackScholes.calcular_payoff_estrategia(patas_opt, T=0, r=0.05, sigma=0.2, precio_min=140, precio_max=160, puntos=3)
+    # En S=140 (out of money), PnL = (0 - 5.0) * 1 * 100 = -500$
+    assert res_opt["pnl_vencimiento"][0] == -500.0
+    # En S=160 (in the money), PnL = (10 - 5.0) * 1 * 100 = 500$
+    assert res_opt["pnl_vencimiento"][-1] == 500.0
+

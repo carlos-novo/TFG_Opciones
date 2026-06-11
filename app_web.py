@@ -1,1040 +1,1586 @@
-﻿import streamlit as st
+import streamlit as st
 import hashlib
-from datetime import date
+from datetime import date, datetime
 import threading
 import time
+import random
+import json
+import pandas as pd
+import socket
+import os
+import plotly.graph_objects as go
+
 from conexion_ibkr import GestorIBKR
 from motor_logica import MotorEstrategias, MotorSalida
 from base_datos import GestorBaseDatos
 from motor_bs import MotorBlackScholes
 from notificaciones import enviar_alerta_webhook
-import socket
+from watchdogs import iniciar_watchdog_entradas, iniciar_watchdog_salidas, detener_watchdogs
 
+# Inicialización de la base de datos
 db = GestorBaseDatos()
 
-# --- HILO DE POLLING ASÍNCRONO (DÍA 8) ---
+# --- INICIALIZACIÓN GLOBAL DE WATCHDOGS (HITO 4) ---
 @st.cache_resource
-def iniciar_hilo_polling():
-    """Lanza el hilo de polling en background para órdenes (solo 1 vez por sesión global)."""
-    db_poll = GestorBaseDatos()
-    broker_poll = GestorIBKR()
+def iniciar_watchdogs_globales():
+    """Inicializa una única vez los watchdogs en segundo plano de entrada y salida."""
+    try:
+        # Iniciamos el watchdog de entradas (cada 30s) y de salidas (cada 15s)
+        hilo_ent = iniciar_watchdog_entradas(db_name="tfg_trading.db", interval=30)
+        hilo_sal = iniciar_watchdog_salidas(db_name="tfg_trading.db", interval=15)
+        db.registrar_evento("WATCHDOGS_INICIADOS_UI", "Watchdogs globales arrancados desde el frontend.")
+        return hilo_ent, hilo_sal
+    except Exception as e:
+        print(f"Error al iniciar watchdogs: {e}")
+        return None, None
+
+# Arrancamos los watchdogs
+hilo_ent_glob, hilo_sal_glob = iniciar_watchdogs_globales()
+
+# --- CONFIGURACIÓN DE PÁGINA ---
+st.set_page_config(page_title="Plataforma de Trading Multileg", layout="wide")
+
+# --- ESTILOS PREMIUM GLASSMORPHISM (DARK MODE) ---
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap');
     
-    def worker():
-        while True:
-            try:
-                df_ops = db_poll.obtener_operaciones()
-                if df_ops is not None and not df_ops.empty:
-                    # Filtramos las órdenes que aún no son finales
-                    pendientes = df_ops[~df_ops['status'].isin(['Filled', 'Cancelled', 'Inactive'])]
-                    if not pendientes.empty:
-                        estados_actuales = broker_poll.consultar_estado_ordenes()
-                        for _, row in pendientes.iterrows():
-                            oid = row['order_id']
-                            estado_anterior = row['status']
-                            
-                            if oid in estados_actuales:
-                                nuevo_estado = estados_actuales[oid]
-                                if nuevo_estado != estado_anterior:
-                                    db_poll.actualizar_estado_orden(oid, nuevo_estado)
-                                    db_poll.registrar_evento('POLLING_ACTUALIZACION', f"Orden #{oid}: {estado_anterior} -> {nuevo_estado}")
-                                    if nuevo_estado in ['Filled', 'Cancelled']:
-                                        color = "success" if nuevo_estado == 'Filled' else "warning"
-                                        enviar_alerta_webhook(f"Actualización de Orden #{oid}", f"Estado cambiado de {estado_anterior} a **{nuevo_estado}**", color)
-                            else:
-                                # Si no está en OpenOrders ni en Executions, IBKR la ha destruido (ej. rechazo instantáneo)
-                                db_poll.actualizar_estado_orden(oid, 'Cancelled')
-                                db_poll.registrar_evento('POLLING_ACTUALIZACION', f"Orden #{oid}: {estado_anterior} -> Cancelled (Purgada por IBKR)")
-            except Exception as e:
-                print(f"Hilo de polling: Error -> {e}")
-            
-            # Polling cada 10 segundos (no bloquea UI)
-            time.sleep(10)
-
-    hilo = threading.Thread(target=worker, daemon=True)
-    hilo.start()
-    return hilo
-
-# Instanciamos el hilo al arrancar la app
-hilo_polling = iniciar_hilo_polling()
-
-# --- HILO WATCHDOG Y COLA DE REINTENTOS (DÍAS 10-11) ---
-@st.cache_resource
-def iniciar_hilo_watchdog():
-    """Lanza el hilo watchdog para comprobar la salud TCP y despachar reintentos."""
-    db_wd = GestorBaseDatos()
-    broker_wd = GestorIBKR()
+    /* Global Styles */
+    html, body, [data-testid="stAppViewContainer"] {
+        font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background-color: #0d0e15;
+        color: #e2e8f0;
+    }
     
-    def worker():
-        estado_previo = True
-        while True:
-            try:
-                # 1. Comprobación de salud TCP (Capa 4)
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(2.0)
-                    import os
-                    host_ibkr = os.environ.get('IBKR_HOST', '127.0.0.1')
-                    resultado = s.connect_ex((host_ibkr, 4002))
-                    estado_actual = (resultado == 0)
-                
-                if estado_previo and not estado_actual:
-                    db_wd.registrar_evento("WATCHDOG_ALERTA", "Pérdida de conexión TCP con IBKR Gateway (Puerto 4002)")
-                elif not estado_previo and estado_actual:
-                    db_wd.registrar_evento("WATCHDOG_INFO", "Conexión TCP recuperada con IBKR Gateway")
-                
-                # 2. Procesar cola de reintentos SIEMPRE que haya conexión (Capa 7)
-                if estado_actual:
-                    df_cola = db_wd.obtener_reintentos_pendientes()
-                    if df_cola is not None and not df_cola.empty:
-                        db_wd.registrar_evento("WATCHDOG_INFO", f"Procesando {len(df_cola)} órdenes en cola...")
-                        from datetime import datetime
-                        for _, row in df_cola.iterrows():
-                            try:
-                                v_date = datetime.strptime(row['vencimiento'], '%Y%m%d').date()
-                                strikes = [row['put_long'], row['put_short'], row['call_short'], row['call_long']]
-                                res = broker_wd.enviar_orden_iron_condor(row['ticker'], v_date, strikes, row['credito'])
-                                
-                                # Recuperación exitosa
-                                metricas_dummy = {'max_beneficio': 0, 'max_riesgo': 0, 'ratio_rb': 0}
-                                db_wd.registrar_operacion(res['order_id'], row['ticker'], v_date, strikes, row['credito'], metricas_dummy, res['status'])
-                                db_wd.marcar_reintento_procesado(row['id'], 'SENT')
-                                db_wd.registrar_evento("ORDEN_RECUPERADA", f"Orden encolada enviada al Gateway. OrderId: {res['order_id']}")
-                                enviar_alerta_webhook(
-                                    "🔄 Orden Recuperada por el Watchdog", 
-                                    f"El sistema ha recuperado la conexión y ha enviado con éxito la orden encolada de **{row['ticker']}**.\n**OrderId:** {res['order_id']}", 
-                                    "success"
-                                )
-                            except Exception as e:
-                                intentos_act = db_wd.incrementar_intentos(row['id'])
-                                if intentos_act >= 3:
-                                    db_wd.marcar_reintento_procesado(row['id'], 'FAILED')
-                                    db_wd.registrar_evento("WATCHDOG_ERROR", f"Orden {row['ticker']} descartada (Poison Pill). Excedió 3 intentos.")
-                                    enviar_alerta_webhook("🚨 Alerta de Poison Pill", f"La orden encolada de **{row['ticker']}** ha sido descartada permanentemente tras 3 intentos fallidos de conexión con el bróker. Verifica los contratos.", "error")
-                                else:
-                                    pass # Se reintenta en el siguiente ciclo
-                
-                estado_previo = estado_actual
-            except Exception as e:
-                print(f"Error en Watchdog: {e}")
-                
-            time.sleep(5)
-            
-    hilo = threading.Thread(target=worker, daemon=True)
-    hilo.start()
-    return hilo
-
-hilo_watchdog = iniciar_hilo_watchdog()
-
-# --- ESTADO COMPARTIDO DEL MONITOR DE SALIDA (thread-safe) ---
-# Este dict es la única vía de comunicación entre el hilo daemon y la UI de Streamlit.
-# Se gestiona con @st.cache_resource para sobrevivir a los reruns de Streamlit.
-@st.cache_resource
-def obtener_estado_monitor():
-    """Devuelve el dict compartido del Monitor de Salida (singleton por proceso)."""
-    return {
-        "activo":           False,
-        "ticker":           None,
-        "vencimiento":      None,
-        "strikes":          None,
-        "credito_inicial":  0.0,
-        "pct_tp":           50.0,
-        "pct_sl":           200.0,
-        "pnl_actual":       None,   # Actualizado por el hilo en cada ciclo
-        "ultimo_evento":    None,   # 'TAKE_PROFIT' | 'STOP_LOSS' | None
+    /* Header styling */
+    h1, h2, h3, h4, h5, h6 {
+        font-family: 'Outfit', sans-serif;
+        font-weight: 600;
+        color: #ffffff;
+        letter-spacing: -0.02em;
+    }
+    
+    /* Sidebar styling */
+    [data-testid="stSidebar"] {
+        background-color: #06070b;
+        border-right: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    
+    /* Card Glassmorphism */
+    div[data-testid="stMetric"] {
+        background: rgba(255, 255, 255, 0.02);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        border-radius: 16px;
+        padding: 20px;
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    div[data-testid="stMetric"]:hover {
+        border-color: rgba(99, 102, 241, 0.4);
+        box-shadow: 0 8px 32px 0 rgba(99, 102, 241, 0.15);
+        transform: translateY(-3px);
+    }
+    
+    /* Metric values in theme blue */
+    div[data-testid="stMetricValue"],
+    div[data-testid="stMetricValue"] * {
+        color: #6366f1 !important;
+    }
+    
+    /* Tabs customization */
+    button[data-baseweb="tab"] {
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: #94a3b8;
+        padding: 12px 20px;
+        border-radius: 8px;
+        transition: all 0.2s ease;
+    }
+    button[data-baseweb="tab"]:hover {
+        color: #ffffff;
+        background-color: rgba(255, 255, 255, 0.03);
+    }
+    button[data-baseweb="tab"][aria-selected="true"] {
+        color: #6366f1 !important;
+        border-bottom-color: #6366f1 !important;
+        background-color: rgba(99, 102, 241, 0.05);
+    }
+    
+    /* Barra inferior de pestaña seleccionada a azul */
+    .stTabs [data-baseweb="tab-highlight"] {
+        background-color: #6366f1 !important;
+    }
+    div[data-baseweb="tab-highlight-bar"] {
+        background-color: #6366f1 !important;
+    }
+    
+    /* Toggles y checkboxes activos a color azul (usando :has ya que la pista del switch está antes del input en el DOM) */
+    div[data-testid="stCheckbox"] label:has(input:checked) > *:first-child,
+    label[data-baseweb="checkbox"]:has(input:checked) > *:first-child {
+        background-color: #6366f1 !important;
+        border-color: #6366f1 !important;
+    }
+    
+    /* Prevenir que el texto de las etiquetas se coloree de azul */
+    div[data-testid="stWidgetLabel"],
+    div[data-testid="stMarkdownContainer"],
+    div[data-testid="stWidgetLabel"] *,
+    div[data-testid="stMarkdownContainer"] * {
+        background-color: transparent !important;
+        background: transparent !important;
+    }
+    
+    /* Styled Containers (Expander, Form, etc.) */
+    div[data-testid="stExpander"] {
+        background: rgba(255, 255, 255, 0.01) !important;
+        border: 1px solid rgba(255, 255, 255, 0.05) !important;
+        border-radius: 12px !important;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2) !important;
+    }
+    
+    .stForm {
+        background: rgba(255, 255, 255, 0.01) !important;
+        border: 1px solid rgba(255, 255, 255, 0.05) !important;
+        border-radius: 16px !important;
+        padding: 24px !important;
+    }
+    
+    /* Accent Buttons */
+    div.stButton > button {
+        background: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%);
+        color: white;
+        border: none;
+        border-radius: 10px;
+        font-weight: 600;
+        padding: 10px 24px;
+        box-shadow: 0 4px 14px rgba(79, 70, 229, 0.4);
+        transition: all 0.2s ease;
+    }
+    div.stButton > button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 6px 20px rgba(79, 70, 229, 0.6);
+        background: linear-gradient(135deg, #5a52e6 0%, #4c8ff7 100%);
+        color: white;
+    }
+    div.stButton > button:active {
+        transform: translateY(1px);
+    }
+    
+    /* Alert cards custom styles */
+    .stAlert {
+        border-radius: 12px !important;
+        background-color: rgba(30, 41, 59, 0.7) !important;
+        border: 1px solid rgba(255, 255, 255, 0.1) !important;
+    }
+    
+    /* Option Omega style Segmented Control (Pills) */
+    div[data-testid="stSegmentedControl"] {
+        background-color: #1a1c29 !important;
+        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        border-radius: 8px !important;
+        padding: 2px !important;
+        width: 100% !important;
+    }
+    div[data-testid="stSegmentedControl"] > div {
+        display: flex !important;
+        gap: 2px !important;
+        width: 100% !important;
+    }
+    div[data-testid="stSegmentedControl"] button {
+        flex: 1 !important;
+        border-radius: 6px !important;
+        border: none !important;
+        background-color: transparent !important;
+        color: #94a3b8 !important;
+        font-weight: 600 !important;
+        padding: 6px 10px !important;
+        font-size: 0.85rem !important;
+        text-align: center !important;
+        transition: all 0.2s ease !important;
+    }
+    div[data-testid="stSegmentedControl"] button:hover {
+        color: #ffffff !important;
+        background-color: rgba(255, 255, 255, 0.05) !important;
+    }
+    
+    /* Custom classes added by JS observer (fallback) */
+    button.btn-sell[aria-checked="true"],
+    button.btn-sell[aria-selected="true"],
+    button.btn-sell[aria-pressed="true"],
+    button.btn-sell[data-testid="stBaseButton-segmented_controlActive"],
+    button.btn-sell.e1mwqyj913 {
+        background-color: #e13c56 !important;
+        color: #ffffff !important;
+        box-shadow: 0 2px 8px rgba(225, 60, 86, 0.4) !important;
+        border: none !important;
+        border-color: transparent !important;
+        outline: none !important;
+    }
+    button.btn-buy[aria-checked="true"],
+    button.btn-buy[aria-selected="true"],
+    button.btn-buy[aria-pressed="true"],
+    button.btn-buy[data-testid="stBaseButton-segmented_controlActive"],
+    button.btn-buy.e1mwqyj913 {
+        background-color: #6366f1 !important;
+        color: #ffffff !important;
+        box-shadow: 0 2px 8px rgba(99, 102, 241, 0.4) !important;
+        border: none !important;
+        border-color: transparent !important;
+        outline: none !important;
+    }
+    .row-action-sell button.btn-call[aria-checked="true"],
+    .row-action-sell button.btn-call[aria-selected="true"],
+    .row-action-sell button.btn-call[aria-pressed="true"],
+    .row-action-sell button.btn-call[data-testid="stBaseButton-segmented_controlActive"],
+    .row-action-sell button.btn-call.e1mwqyj913,
+    .row-action-sell button.btn-put[aria-checked="true"],
+    .row-action-sell button.btn-put[aria-selected="true"],
+    .row-action-sell button.btn-put[aria-pressed="true"],
+    .row-action-sell button.btn-put[data-testid="stBaseButton-segmented_controlActive"],
+    .row-action-sell button.btn-put.e1mwqyj913 {
+        background-color: #e13c56 !important;
+        color: #ffffff !important;
+        box-shadow: 0 2px 8px rgba(225, 60, 86, 0.4) !important;
+        border: none !important;
+        border-color: transparent !important;
+        outline: none !important;
+    }
+    .row-action-buy button.btn-call[aria-checked="true"],
+    .row-action-buy button.btn-call[aria-selected="true"],
+    .row-action-buy button.btn-call[aria-pressed="true"],
+    .row-action-buy button.btn-call[data-testid="stBaseButton-segmented_controlActive"],
+    .row-action-buy button.btn-call.e1mwqyj913,
+    .row-action-buy button.btn-put[aria-checked="true"],
+    .row-action-buy button.btn-put[aria-selected="true"],
+    .row-action-buy button.btn-put[aria-pressed="true"],
+    .row-action-buy button.btn-put[data-testid="stBaseButton-segmented_controlActive"],
+    .row-action-buy button.btn-put.e1mwqyj913 {
+        background-color: #6366f1 !important;
+        color: #ffffff !important;
+        box-shadow: 0 2px 8px rgba(99, 102, 241, 0.4) !important;
+        border: none !important;
+        border-color: transparent !important;
+        outline: none !important;
     }
 
-# --- HILO WATCHDOG DE SALIDA (TP/SL) ---
-@st.cache_resource
-def iniciar_hilo_watchdog_salida():
-    """
-    Lanza el Watchdog de Salida en background (solo 1 vez por sesión global).
+    /* PURE CSS SELECTORS (No JS required) based on Column Wrapper child index */
+    
+    /* SELL Active in Column 1 (1st child of stHorizontalBlock) */
+    div[data-testid="stHorizontalBlock"] > div:nth-child(1) button[data-testid="stBaseButton-segmented_controlActive"]:nth-child(1) {
+        background-color: #e13c56 !important;
+        color: #ffffff !important;
+        box-shadow: 0 2px 8px rgba(225, 60, 86, 0.4) !important;
+        border: none !important;
+        border-color: transparent !important;
+        outline: none !important;
+    }
+    
+    /* BUY Active in Column 1 (1st child of stHorizontalBlock) */
+    div[data-testid="stHorizontalBlock"] > div:nth-child(1) button[data-testid="stBaseButton-segmented_controlActive"]:nth-child(2) {
+        background-color: #6366f1 !important;
+        color: #ffffff !important;
+        box-shadow: 0 2px 8px rgba(99, 102, 241, 0.4) !important;
+        border: none !important;
+        border-color: transparent !important;
+        outline: none !important;
+    }
+    
+    /* Active CALL/PUT inside a SELL row (Column 2 active button when Column 1 has 1st button active) */
+    div[data-testid="stHorizontalBlock"]:has(> div:nth-child(1) button[data-testid="stBaseButton-segmented_controlActive"]:nth-child(1))
+    > div:nth-child(2) button[data-testid="stBaseButton-segmented_controlActive"] {
+        background-color: #e13c56 !important;
+        color: #ffffff !important;
+        box-shadow: 0 2px 8px rgba(225, 60, 86, 0.4) !important;
+        border: none !important;
+        border-color: transparent !important;
+        outline: none !important;
+    }
+    
+    /* Active CALL/PUT inside a BUY row (Column 2 active button when Column 1 has 2nd button active) */
+    div[data-testid="stHorizontalBlock"]:has(> div:nth-child(1) button[data-testid="stBaseButton-segmented_controlActive"]:nth-child(2))
+    > div:nth-child(2) button[data-testid="stBaseButton-segmented_controlActive"] {
+        background-color: #6366f1 !important;
+        color: #ffffff !important;
+        box-shadow: 0 2px 8px rgba(99, 102, 241, 0.4) !important;
+        border: none !important;
+        border-color: transparent !important;
+        outline: none !important;
+    }
 
-    El hilo monitoriza en tiempo real el P&L de la posición Iron Condor activa
-    consultando a IBKR cada 15 segundos. Cuando el P&L supera el umbral de
-    Take Profit o Stop Loss, ejecuta automáticamente la orden de cierre BAG
-    y notifica por Discord.
+    /* Blue 'X' delete button inside column 7 */
+    div[data-testid="stHorizontalBlock"] > div:nth-child(7) button {
+        background: transparent !important;
+        border: 1px solid rgba(99, 102, 241, 0.4) !important;
+        color: #6366f1 !important;
+        box-shadow: none !important;
+        border-radius: 8px !important;
+        width: 100% !important;
+        height: 40px !important;
+        min-height: 40px !important;
+        min-width: 40px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        padding: 0 !important;
+        line-height: 1 !important;
+    }
+    div[data-testid="stHorizontalBlock"] > div:nth-child(7) button * {
+        color: #6366f1 !important;
+        font-size: 1.25rem !important;
+        font-weight: 700 !important;
+    }
+    div[data-testid="stHorizontalBlock"] > div:nth-child(7) button:hover {
+        background: rgba(99, 102, 241, 0.15) !important;
+        border-color: #6366f1 !important;
+    }
+    div[data-testid="stHorizontalBlock"] > div:nth-child(7) button:hover * {
+        color: #ffffff !important;
 
-    Patrón idéntico al Watchdog de red: threading.Thread(daemon=True) +
-    @st.cache_resource para garantizar una única instancia por proceso.
-    """
-    db_ms  = GestorBaseDatos()
-    broker_ms = GestorIBKR()
-    estado = obtener_estado_monitor()   # Referencia al dict compartido
+    /* Custom Strategy Card Container */
+    div[class*="st-key-strategy_card_"] {
+        background: rgba(255, 255, 255, 0.02) !important;
+        border: 1px solid rgba(99, 102, 241, 0.2) !important;
+        border-radius: 12px !important;
+        padding: 20px !important;
+        margin-bottom: 15px !important;
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37) !important;
+        backdrop-filter: blur(10px) !important;
+        -webkit-backdrop-filter: blur(10px) !important;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-    def worker():
-        from motor_logica import MotorSalida
-        while True:
-            try:
-                if estado["activo"] and estado["ticker"]:
-                    # 1. Consultar P&L actual filtrando por el ticker de la estrategia
-                    pnl = broker_ms.obtener_pnl_posiciones_opciones(
-                        ticker_filtro=estado["ticker"]
-                    )
-
-                    if pnl is not None:
-                        # Actualizamos el P&L en el dict compartido para la UI
-                        estado["pnl_actual"] = pnl
-
-                        # 2. Evaluar si se han alcanzado los umbrales
-                        resultado = MotorSalida.evaluar_condicion_salida(
-                            pnl_actual      = pnl,
-                            credito_inicial = estado["credito_inicial"],
-                            pct_tp          = estado["pct_tp"],
-                            pct_sl          = estado["pct_sl"]
-                        )
-
-                        accion = resultado["accion"]
-
-                        if accion in ("TAKE_PROFIT", "STOP_LOSS"):
-                            # 3. Ejecutar el cierre automático
-                            try:
-                                res_cierre = broker_ms.enviar_orden_cierre_iron_condor(
-                                    ticker      = estado["ticker"],
-                                    vencimiento = estado["vencimiento"],
-                                    strikes     = estado["strikes"]
-                                )
-
-                                # 4. Registrar en auditoría
-                                etiqueta = "CIERRE_TP" if accion == "TAKE_PROFIT" else "CIERRE_SL"
-                                db_ms.registrar_evento(
-                                    etiqueta,
-                                    f"Ticker:{estado['ticker']} | P&L:{pnl} | "
-                                    f"OrderId:{res_cierre['order_id']} | Status:{res_cierre['status']}"
-                                )
-
-                                # 5. Notificar por Discord
-                                pnl_pct_real = round((pnl / estado["credito_inicial"]) * 100, 1) if estado["credito_inicial"] else 0
-                                if accion == "TAKE_PROFIT":
-                                    enviar_alerta_webhook(
-                                        "🟢 Take Profit Alcanzado — Posición Cerrada",
-                                        f"**Ticker:** {estado['ticker']}\n"
-                                        f"**P&L al cierre:** ${pnl}\n"
-                                        f"**Umbral TP:** +${resultado['umbral_tp_usd']} "
-                                        f"({estado['pct_tp']}% de la prima)\n"
-                                        f"**OrderId de cierre:** {res_cierre['order_id']}",
-                                        "success"   # Verde
-                                    )
-                                else:
-                                    enviar_alerta_webhook(
-                                        "🔴 Stop Loss Alcanzado — Posición Cerrada",
-                                        f"**Ticker:** {estado['ticker']}\n"
-                                        f"**P&L al cierre:** ${pnl}\n"
-                                        f"**Umbral SL:** ${resultado['umbral_sl_usd']} "
-                                        f"({estado['pct_sl']}% de la prima)\n"
-                                        f"**OrderId de cierre:** {res_cierre['order_id']}",
-                                        "error"     # Rojo
-                                    )
-
-                                # 6. Desactivar el monitor para evitar dobles cierres
-                                estado["activo"]        = False
-                                estado["ultimo_evento"] = accion
-
-                            except Exception as e_cierre:
-                                db_ms.registrar_evento(
-                                    "ERROR_CIERRE_AUTOMATICO",
-                                    f"Ticker:{estado['ticker']} | Acción:{accion} | Error:{e_cierre}"
-                                )
-                                enviar_alerta_webhook(
-                                    "⚠️ Error en Cierre Automático",
-                                    f"El Watchdog de Salida no pudo cerrar la posición de "
-                                    f"**{estado['ticker']}** ({accion}).\nError técnico: {e_cierre}",
-                                    "warning"
-                                )
-
-            except Exception as e:
-                print(f"Watchdog de Salida: Error en ciclo de monitoreo — {e}")
-
-            time.sleep(15)  # Intervalo de polling: 15 segundos
-
-    hilo = threading.Thread(target=worker, daemon=True)
-    hilo.start()
-    return hilo
-
-hilo_watchdog_salida = iniciar_hilo_watchdog_salida()
-
-# --- 0. CONFIGURACIÓN DE PÁGINA (Debe ser el primer comando de Streamlit) ---
-st.set_page_config(page_title="Plataforma de Trading", layout="wide")
-
-# --- 1. LÓGICA DE SEGURIDAD Y ENCRIPTACIÓN ---
-# Usuario: admin | Contraseña para generar el hash: admin2026
+# --- LÓGICA DE SEGURIDAD Y ENCRIPTACIÓN ---
 ADMIN_USER = "admin"
-ADMIN_PASSWORD_HASH = "6051fc84a7a0d74c225fb18a496b09952da5642e60723ecae543298edd7d82d6"
+ADMIN_PASSWORD_HASH = "6051fc84a7a0d74c225fb18a496b09952da5642e60723ecae543298edd7d82d6" # admin2026
 
 def verificar_credenciales(usuario, password):
-    """Encripta la contraseña introducida y la compara con el hash seguro."""
     hash_input = hashlib.sha256(password.encode()).hexdigest()
     return usuario == ADMIN_USER and hash_input == ADMIN_PASSWORD_HASH
 
-# Inicializamos la variable de sesión para el control de acceso
 if 'autenticado' not in st.session_state:
     st.session_state['autenticado'] = False
 
-
-# --- 2. BARRERA DE ENTRADA (PANTALLA DE LOGIN) ---
+# --- BARRERA DE ENTRADA (LOGIN) ---
 if not st.session_state['autenticado']:
-    
-    # Usamos columnas para centrar el formulario de login en la pantalla
-    col1, col2, col3 = st.columns([1, 1, 1])
-    
+    col1, col2, col3 = st.columns([1, 1.2, 1])
     with col2:
-        st.title("🔐 Acceso Restringido")
-        st.info("Introduce tus credenciales para acceder al sistema algorítmico.")
+        st.markdown("<br><br><br>", unsafe_allow_html=True)
+        st.markdown("<h2 style='text-align: center;'>🔒 Consola Algorítmica TFG</h2>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align: center; color: #94a3b8;'>Introduce tus credenciales para acceder a la plataforma multileg.</p>", unsafe_allow_html=True)
         
         with st.form("login_form"):
             user_input = st.text_input("Usuario")
             pass_input = st.text_input("Contraseña", type="password")
-            submit_login = st.form_submit_button("Entrar al Sistema")
+            submit_login = st.form_submit_button("Iniciar Sesión")
             
             if submit_login:
                 if verificar_credenciales(user_input, pass_input):
                     st.session_state['autenticado'] = True
-                    # --- REGISTRO EN BD ---
                     db.registrar_evento("LOGIN_EXITOSO", f"Usuario '{user_input}' ha accedido al sistema.")
-                    st.rerun() # Fuerza la recarga para pasar la barrera
+                    st.rerun()
                 else:
                     st.error("Credenciales incorrectas. Acceso denegado.")
-    
-    # st.stop() detiene la ejecución del script aquí. 
-    # El código del bróker que hay debajo NO se ejecutará si no hay login.
-    st.stop() 
+    st.stop()
 
-
-# =====================================================================
-# --- 3. APLICACIÓN PRINCIPAL (SOLO ACCESIBLE SI AUTENTICADO == TRUE) ---
-# =====================================================================
-
-# Inicializamos la clase gestora en el estado de la sesión para no perderla en las recargas
+# --- APLICACIÓN PRINCIPAL (AUTENTICADO) ---
 if 'broker' not in st.session_state:
-    st.session_state.broker = GestorIBKR(port=4002) # Cambiar a 4002 si usas Gateway puro
-if 'precio_test' not in st.session_state:
-    st.session_state.precio_test = None
+    st.session_state.broker = GestorIBKR(port=4002)
+
+if 'posiciones_cartera' not in st.session_state:
+    st.session_state['posiciones_cartera'] = None
 
 # --- BARRA LATERAL (SIDEBAR) ---
-st.sidebar.title("Configuración de Red")
+st.sidebar.title("🛠️ Configuración de Red")
 
-# Botón de Cerrar Sesión añadido en la parte superior del sidebar
-if st.sidebar.button("🚪 Cerrar Sesión", width='stretch'):
+# Botón de Cerrar Sesión
+if st.sidebar.button("🚪 Cerrar Sesión", width="stretch"):
     st.session_state['autenticado'] = False
     if st.session_state.broker.esta_conectado():
         st.session_state.broker.desconectar()
     st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("Prueba de Conectividad")
+st.sidebar.subheader("Conexión al Broker")
 
-# Lógica del botón de conexión
-if st.sidebar.button("Alternar Conexión al Bróker"):
+if st.sidebar.button("Alternar Conexión (Gateway)", width="stretch"):
     if st.session_state.broker.esta_conectado():
         st.session_state.broker.desconectar()
     else:
         st.session_state.broker.conectar()
-    st.rerun() # Fuerza la recarga para actualizar los indicadores visuales
+    st.rerun()
 
-# Indicador visual de estado
 conectado = st.session_state.broker.esta_conectado()
-color = "🟢" if conectado else "🔴"
-texto_estado = "Conectado" if conectado else "Desconectado"
-st.sidebar.metric(label="Estado IBKR", value=f"{color} {texto_estado}")
+color_est = "🟢" if conectado else "🔴"
+texto_est = "Conectado (Puerto 4002)" if conectado else "Desconectado"
+st.sidebar.metric(label="Estado IBKR", value=f"{color_est} {texto_est}")
 
-# Campo para elegir qué ticker probar
-ticker_test = st.sidebar.text_input("Ticker a probar", value="SPY", max_chars=5).upper()
-
-if st.sidebar.button("Probar Datos de Mercado"):
+# Prueba de cotizaciones
+ticker_test = st.sidebar.text_input("Probar Ticker", value="SPY", max_chars=5).upper()
+if st.sidebar.button("Consultar Cotización", width="stretch"):
     if conectado:
-        with st.sidebar.status("Consultando bróker...", expanded=False) as status:
+        with st.sidebar.status("Consultando precio...", expanded=False) as status:
             precio = st.session_state.broker.obtener_precio_prueba(ticker_test)
-            
             if precio:
                 status.update(label=f"¡Éxito! {ticker_test}: ${precio}", state="complete")
                 st.sidebar.success(f"Último precio de {ticker_test}: **${precio}**")
             else:
                 status.update(label="Fallo en la consulta", state="error")
-                st.sidebar.error("No se recibió precio. Verifica que el ticker es válido.")
+                st.sidebar.error("Verifica que el ticker sea válido y el mercado esté abierto.")
     else:
-        st.sidebar.warning("⚠️ Debes estar conectado para probar datos.")
+        st.sidebar.warning("⚠️ Debes estar conectado para consultar precios reales. (Modo Offline habilitado para validación).")
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("<small style='color: #64748b;'>TFG Carlos Novo - Plataforma de Trading Algorítmico 2026</small>", unsafe_allow_html=True)
 
 
-# --- ÁREA PRINCIPAL ---
-st.title("Panel de Control - Algorítmico de Opciones")
+# --- CONFIGURACIÓN DE PESTAÑAS (4 TABS) ---
+st.title("🏛️ Plataforma Algorítmica de Trading Multileg")
+st.markdown("<p style='color: #94a3b8; font-size: 1.1rem; margin-top:-15px;'>Filtros avanzados, sensibilidades Black-Scholes y Watchdogs desacoplados</p>", unsafe_allow_html=True)
 
-tabs = st.tabs(["📊 Dashboard", "⚙️ Nueva Estrategia", "📈 Monitorización", "🧪 Backtest Visual"])
+tabs = st.tabs(["📊 Dashboard", "⚙️ Acciones", "📐 Opciones", "📈 Control Room"])
+
+# ==========================================
+# TAB 1: DASHBOARD
+# ==========================================
+with tabs[0]:
+    st.header("Consola Principal del Bróker")
+    
+    # 1. Indicadores Financieros
+    if conectado:
+        with st.spinner("Sincronizando cuenta con IBKR..."):
+            datos_cuenta = st.session_state.broker.obtener_resumen_cuenta()
+        if datos_cuenta:
+            net_liq = float(datos_cuenta['NetLiquidation'])
+            buying_power = float(datos_cuenta['BuyingPower'])
+            daily_pnl = float(datos_cuenta['DailyPnL'])
+        else:
+            net_liq, buying_power, daily_pnl = 100000.0, 50000.0, 0.0
+    else:
+        # Mocks para defensa TFG si no hay gateway conectado
+        net_liq, buying_power, daily_pnl = 152430.80, 78920.40, 3250.00
+        st.info("💡 Bróker desconectado. Visualizando datos simulados (Modo Demostración TFG).")
+        
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Net Liquidation", f"${net_liq:,.2f}", delta=f"{'+' if daily_pnl >= 0 else ''}${daily_pnl:,.2f} Hoy")
+    c2.metric("Buying Power", f"${buying_power:,.2f}")
+    c3.metric("Daily P&L (No Realizado)", f"${daily_pnl:,.2f}", delta=f"{'+' if daily_pnl >= 0 else ''}{daily_pnl/net_liq*100:.2f}%", delta_color="normal")
+    
+    st.divider()
+    
+    # 2. Posiciones Abiertas
+    st.subheader("📂 Posiciones Abiertas en Cartera")
+    st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Monitoreo directo del portafolio actual del bróker.</p>", unsafe_allow_html=True)
+    
+    @st.fragment(run_every=15)
+    def render_posiciones_cartera():
+        col_ref, _ = st.columns([1, 4])
+        actualizar = col_ref.button("🔄 Actualizar Cartera", key="btn_act_pos")
+        
+        if conectado:
+            # Siempre consultamos las últimas posiciones en cada autorefresh de 15s si está conectado
+            st.session_state['posiciones_cartera'] = st.session_state.broker.obtener_posiciones_cartera()
+        else:
+            if actualizar or st.session_state.get('posiciones_cartera') is None:
+                st.session_state['posiciones_cartera'] = [
+                    {"Símbolo": "AAPL", "Tipo": "Acción", "Vencimiento": "—", "Strike": "—", "Right (C/P)": "—", "Posición": 100, "Precio Medio": 175.50, "Valor Mercado": 18120.00, "P&L No Real.": 570.00},
+                    {"Símbolo": "SPY", "Tipo": "Opción", "Vencimiento": "2026-06-19", "Strike": 510.0, "Right (C/P)": "C", "Posición": -2, "Precio Medio": 4.20, "Valor Mercado": -940.00, "P&L No Real.": -100.00},
+                    {"Símbolo": "MSFT", "Tipo": "Acción", "Vencimiento": "—", "Strike": "—", "Right (C/P)": "—", "Posición": 50, "Precio Medio": 405.00, "Valor Mercado": 20450.00, "P&L No Real.": 200.00}
+                ]
+                
+        posiciones = st.session_state.get('posiciones_cartera', [])
+        
+        if not posiciones:
+            st.success("✅ Sin posiciones abiertas en la cuenta. La cartera está 100% en efectivo.")
+        else:
+            df_pos = pd.DataFrame(posiciones)
+            st.dataframe(df_pos, width="stretch", hide_index=True)
+            
+    render_posiciones_cartera()
+
 
 with tabs[1]:
-    st.header("Definición de Estrategia: Iron Condor")
+    st.header("Nueva Orden Direccional de Acciones")
+
+    st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Encolador de estrategias con reglas de entrada técnicas y límites de salida absolutos.</p>", unsafe_allow_html=True)
     
-    with st.form("form_iron_condor"):
-        # 1. PARÁMETROS DEL ACTIVO
-        col1, col2 = st.columns(2)
-        ticker = col1.text_input("Ticker del Subyacente", value="SPX")
-        vencimiento = col2.date_input("Fecha de Vencimiento")
-        
-        st.divider()
-        st.subheader("Configuración de las Patas (Strikes)")
-        c1, c2, c3, c4 = st.columns(4)
-        put_long = c1.number_input("Put Long", step=5.0, value=4800.0)
-        put_short = c2.number_input("Put Short", step=5.0, value=4900.0)
-        call_short = c3.number_input("Call Short", step=5.0, value=5100.0)
-        call_long = c4.number_input("Call Long", step=5.0, value=5200.0)
-        
-        st.divider()
-        # 2. PARÁMETROS BLACK-SCHOLES Y ALGORÍTMICOS
-        with st.expander("🧮 Parámetros Black-Scholes (Para Griegas y Heatmap)"):
-            c_bs1, c_bs2 = st.columns(2)
-            volatilidad = c_bs1.slider("Volatilidad Implícita (σ)", min_value=0.05, max_value=0.50, value=0.15, step=0.01)
-            tasa_riesgo = c_bs2.slider("Tasa Libre de Riesgo (r)", min_value=0.0, max_value=0.10, value=0.05, step=0.01)
-
-        with st.expander("🛠️ Condiciones Algorítmicas (Análisis Técnico)"):
-            st.write("Configura el cruce de Medias Móviles (SMA) para condicionar la entrada.")
-            col_at1, col_at2 = st.columns(2)
-            activar_sma = col_at1.checkbox("Activar Condición SMA")
-            periodo_n = col_at2.number_input("Periodo N días", min_value=1, value=200, step=10)
-            tipo_cruce = st.selectbox("Regla de Ejecución", [
-                "Entrar si Precio > SMA", 
-                "Entrar si Precio < SMA"
-            ])
-
-        # 3. ENVÍO DEL FORMULARIO Y LÓGICA DEL MOTOR
-        submit = st.form_submit_button("Lanzar Estrategia")
-        
-    # Lógica de procesamiento tras el envío del formulario
-    if submit:
-        if not conectado:
-            st.error("⚠️ Error: El sistema debe estar conectado al Gateway para lanzar estrategias.")
+    c_a1, c_a2, c_a3 = st.columns(3)
+    ticker_acc = c_a1.text_input("Ticker", value="AAPL", max_chars=5, key="acc_ticker").upper()
+    cant_acc = c_a2.number_input("Cantidad de Acciones", min_value=1, value=50, step=1, key="acc_cantidad")
+    
+    with c_a3:
+        tipo_ord_acc = st.selectbox("Tipo de Orden", ["Mercado", "Límite"], key="acc_tipo_orden")
+        if tipo_ord_acc == "Límite":
+            precio_limite_acc = st.number_input("Precio Límite ($)", min_value=0.01, value=150.0, step=0.1, key="acc_precio_limite")
         else:
-            # Iniciamos el contenedor de estado para la telemetría del bot
-            with st.status("🚀 Ejecutando Validación Algorítmica...", expanded=True) as status:
-                
-                # PASO 1: Obtener precio actual del subyacente
-                status.write("🔍 Consultando precio actual del subyacente...")
-                precio_actual = st.session_state.broker.obtener_precio_prueba(ticker)
-                
-                if not precio_actual:
-                    status.update(label="❌ Error: No se pudo obtener el precio", state="error")
-                    st.error("No se ha podido recuperar el precio actual. Verifica el Ticker.")
-                    st.stop() # Detiene la ejecución de este bloque
-
-                # PASO 2: Validación de Análisis Técnico (SMA)
-                if activar_sma:
-                    status.write(f"📈 Calculando Media Móvil (SMA {periodo_n})...")
-                    try:
-                        validacion = MotorEstrategias.evaluar_condicion_sma(
-                            st.session_state.broker, ticker, periodo_n, tipo_cruce, precio_actual
-                        )
-                        
-                        status.write(f"⚖️ Validando Regla: {tipo_cruce} (SMA: {validacion['valor_sma']})")
-                        
-                        if not validacion["autorizado"]:
-                            status.update(label="⛔ Entrada Bloqueada por Regla AT", state="error")
-                            # REGISTRO EN BD (Intento fallido)
-                            db.registrar_evento("ESTRATEGIA_BLOQUEADA", f"Ticker: {ticker} | Regla: {tipo_cruce}")
-                            enviar_alerta_webhook(
-                                "⛔ Orden Bloqueada (Regla SMA)", 
-                                f"El motor algorítmico ha bloqueado una orden de **{ticker}**.\nEl precio actual (${precio_actual}) no cumple '{tipo_cruce}' respecto a la SMA de {periodo_n} días (${validacion['valor_sma']}).", 
-                                "error"
-                            )
-                            st.warning(
-                                f"Entrada BLOQUEADA. El precio (${precio_actual}) no cumple "
-                                f"'{tipo_cruce}' respecto a la SMA (${validacion['valor_sma']})."
-                            )
-                            st.stop()
-                        
-                        # Filtro AT superado — notificación y registro en BD
-                        st.toast(f"Filtro AT superado: SMA {validacion['valor_sma']}", icon="✅")
-                        db.registrar_evento("ESTRATEGIA_AUTORIZADA", f"Ticker: {ticker} | SMA: {validacion['valor_sma']}")
-                    
-                    except Exception as e:
-                        status.update(label="❌ Error en cálculo de SMA", state="error")
-                        st.error(f"Fallo al evaluar la condición técnica: {e}")
-                        st.stop()
-
-                # PASO 3: Consultar Opciones y calcular crédito real
-                status.write("⛓️ Consultando primas de las 4 patas del Iron Condor...")
-                try:
-                    resultado = MotorEstrategias.calcular_credito_real_iron_condor(
-                        st.session_state.broker, ticker, vencimiento, put_long, put_short, call_short, call_long
-                    )
-                    
-                    credito_real = resultado["credito_neto"]
-                    metricas = MotorEstrategias.calcular_metricas_iron_condor(
-                        put_long, put_short, call_short, call_long, credito_real
-                    )
-                    
-                    status.update(label="✅ Validación Completa y Autorizada", state="complete")
-                    
-                except Exception as e:
-                    status.update(label="❌ Error al consultar opciones", state="error")
-                    st.error(f"Error en el Motor de Agregación: {e}")
-                    st.stop()
-
-            # --- PRESENTACIÓN FINAL DE RESULTADOS (Fuera del status) ---
-            st.success(f"Estrategia '{ticker}' validada y lista para ejecución.")
+            precio_limite_acc = None
             
-            with st.expander("🔍 Ver desglose de Primas de Mercado (Bid/Ask)"):
-                d = resultado["detalle"]
-                col_a, col_b = st.columns(2)
-                col_a.write(f"* **Short Put (Bid):** ${d['p_short_bid']}")
-                col_a.write(f"* **Short Call (Bid):** ${d['c_short_bid']}")
-                col_b.write(f"* **Long Put (Ask):** ${d['p_long_ask']}")
-                col_b.write(f"* **Long Call (Ask):** ${d['c_long_ask']}")
-                
-            with st.expander("📐 Greeks (Black-Scholes)"):
-                dias_vencimiento = (vencimiento - date.today()).days
-                T = max(dias_vencimiento / 365.0, 1e-5)
-                g_pl = MotorBlackScholes.calcular_greeks(precio_actual, put_long, T, tasa_riesgo, volatilidad, 'P')
-                g_ps = MotorBlackScholes.calcular_greeks(precio_actual, put_short, T, tasa_riesgo, volatilidad, 'P')
-                g_cs = MotorBlackScholes.calcular_greeks(precio_actual, call_short, T, tasa_riesgo, volatilidad, 'C')
-                g_cl = MotorBlackScholes.calcular_greeks(precio_actual, call_long, T, tasa_riesgo, volatilidad, 'C')
-                
-                st.write("**Sensibilidades calculadas teóricamente:**")
-                g1, g2 = st.columns(2)
-                g1.write(f"**Long Put:** Δ {g_pl['delta']} | Θ {g_pl['theta']} | V {g_pl['vega']}")
-                g1.write(f"**Short Put:** Δ {g_ps['delta']} | Θ {g_ps['theta']} | V {g_ps['vega']}")
-                g2.write(f"**Short Call:** Δ {g_cs['delta']} | Θ {g_cs['theta']} | V {g_cs['vega']}")
-                g2.write(f"**Long Call:** Δ {g_cl['delta']} | Θ {g_cl['theta']} | V {g_cl['vega']}")
-
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Crédito Real Neto", f"${credito_real}")
-            m2.metric("Máximo Beneficio", f"${metricas['max_beneficio']}")
-            m3.metric("Máximo Riesgo", f"${metricas['max_riesgo']}", delta_color="inverse")
-
-            # Persistimos para el botón de ejecución (sobrevive al rerun de Streamlit)
-            st.session_state['estrategia_validada'] = {
-                'ticker':       ticker,
-                'vencimiento':  vencimiento,
-                'strikes':      [put_long, put_short, call_short, call_long],
-                'credito_real': credito_real,
-                'metricas':     metricas,
-                'tasa_riesgo':  tasa_riesgo,
-                'volatilidad':  volatilidad,
-                'precio_actual': precio_actual
-            }
-
-    # --- BLOQUE DE CONFIRMACIÓN Y EJECUCIÓN (persiste entre reruns) ---
-    if st.session_state.get('estrategia_validada'):
-        ev = st.session_state['estrategia_validada']
-        st.divider()
-        st.warning(
-            "⚠️ ZONA DE EJECUCIÓN — Esta acción envía una orden REAL a IBKR (Paper Trading). "
-            "Revisa los parámetros antes de confirmar."
-        )
-        col_info, col_btn = st.columns([3, 1])
-        col_info.markdown(
-            f"**Iron Condor `{ev['ticker']}`** · Venc: `{ev['vencimiento']}` "
-            f"· Strikes: `{ev['strikes']}` "
-            f"· Crédito: `${ev['credito_real']}` "
-            f"· Riesgo Máx: `${ev['metricas']['max_riesgo']}`"
-        )
-        if col_btn.button("🚀 CONFIRMAR Y EJECUTAR", type="primary", key="btn_ejecutar"):
-            with st.status("📡 Transmitiendo orden BAG al Gateway IBKR...", expanded=True) as status_ord:
-                try:
-                    res = st.session_state.broker.enviar_orden_iron_condor(
-                        ev['ticker'], ev['vencimiento'], ev['strikes'], ev['credito_real']
-                    )
-                    status_ord.update(
-                        label=f"✅ Orden enviada — OrderId: {res['order_id']}",
-                        state="complete"
-                    )
-                    st.success(
-                        f"✅ Orden BAG enviada. OrderId: `{res['order_id']}` "
-                        f"| Estado inicial: `{res['status']}`"
-                    )
-                    db.registrar_evento(
-                        "ORDEN_ENVIADA",
-                        f"OrderId:{res['order_id']} | Ticker:{ev['ticker']} "
-                        f"| Venc:{ev['vencimiento']} | Crédito:{ev['credito_real']}"
-                    )
-                    db.registrar_operacion(
-                        order_id   = res['order_id'],
-                        ticker     = ev['ticker'],
-                        vencimiento= ev['vencimiento'],
-                        strikes    = ev['strikes'],
-                        credito    = ev['credito_real'],
-                        metricas   = ev['metricas'],
-                        status     = res['status']
-                    )
-                    del st.session_state['estrategia_validada']
-
-                    st.session_state['orden_pendiente_monitor'] = {
-                        'order_id':    res['order_id'],
-                        'ticker':      ev['ticker'],
-                        'vencimiento': ev['vencimiento'],
-                        'strikes':     ev['strikes'],
-                        'credito':     ev['credito_real'],
-                    }
-
-                    enviar_alerta_webhook(
-                        "✅ Nueva Orden Iron Condor Enviada",
-                        f"**Ticker:** {ev['ticker']}\n"
-                        f"**Crédito cobrado:** ${ev['credito_real']} · "
-                        f"**Riesgo Máx:** ${ev['metricas']['max_riesgo']}\n"
-                        f"**OrderId:** {res['order_id']}\n"
-                        f"⏳ Configura el Monitor de Salida (TP/SL) en el panel de abajo.",
-                        "success"
-                    )
-
-                    st.rerun()
-                except ValueError as ve:
-                    # Error de validación de negocio (ej. strikes no existen)
-                    status_ord.update(label="❌ Error de Validación de Contratos", state="error")
-                    st.error(f"Error de mercado: {ve}")
-                    enviar_alerta_webhook("⚠️ Error de Contratos", str(ve), "warning")
-                except Exception as e:
-                    # Error técnico (caída del servidor o red)
-                    db.encolar_reintento(ev['ticker'], ev['vencimiento'], ev['strikes'], ev['credito_real'])
-                    db.registrar_evento("ORDEN_ENCOLADA", f"Fallo al enviar {ev['ticker']}. Añadida a cola de reintentos por caída del Gateway. Error: {e}")
-                    status_ord.update(label="⚠️ Servidor caído. Orden encolada", state="error")
-                    st.error("El servidor de IBKR parece estar caído o hubo un error técnico. La orden ha sido guardada en la cola de reintentos.")
-                    enviar_alerta_webhook("⚠️ Caída del servidor (Watchdog Activo)", f"La orden de **{ev['ticker']}** no se pudo enviar por error técnico. Se ha metido en la cola de reintentos. Detalles: {e}", "warning")
-                    
-        # --- BLOQUE DE ANÁLISIS DE SENSIBILIDAD B-S ---
-        # --- BLOQUE DE ANÁLISIS DE SENSIBILIDAD B-S ---
-        st.divider()
-        st.subheader("🔥 Análisis Cuantitativo B-S (Heatmap y Payoff)")
-        st.write("Genera gráficos interactivos para evaluar el perfil de pagos de tu estrategia.")
-        col_btn1, col_btn2 = st.columns(2)
-        
-        with col_btn1:
-            if st.button("Generar Gráfico Payoff 2D"):
-                with st.spinner("Calculando perfil de pagos (Tienda de campaña)..."):
-                    fig_payoff = MotorBlackScholes.generar_payoff_ic(ev['strikes'], ev['credito_real'])
-                    st.pyplot(fig_payoff)
-
-        with col_btn2:
-            if st.button("Generar Heatmap de Sensibilidad (B/R)"):
-                with st.spinner("Calculando malla Black-Scholes..."):
-                    dias_venc = (ev['vencimiento'] - date.today()).days
-                    fig = MotorBlackScholes.generar_heatmap_ic(
-                        ev['precio_actual'], ev['tasa_riesgo'], ev['volatilidad'], dias_venc, ev['strikes']
-                    )
-                    st.pyplot(fig)
-
-if st.session_state.get('orden_pendiente_monitor'):
-    with tabs[1]:
-        opm = st.session_state['orden_pendiente_monitor']
-        st.divider()
-        st.subheader("🎯 Configurar Monitor de Salida (Take Profit / Stop Loss)")
-        st.write(
-            f"Orden **#{opm['order_id']}** enviada. Configura los umbrales de salida "
-            f"para que el Watchdog cierre automáticamente la posición de **{opm['ticker']}**."
-        )
-
-        col_tp_f, col_sl_f, col_cr_f = st.columns(3)
-
-        credito_mon = col_cr_f.number_input(
-            "Crédito inicial cobrado ($)",
-            min_value=0.0,
-            value=float(round(opm['credito'] * 100, 2)),
-            step=10.0,
-            key="mon_credito_inline",
-            help="Prima total: crédito/acción × 100. Pre-rellenado automáticamente."
-        )
-        pct_tp_mon = col_tp_f.number_input(
-            "Take Profit (%)",
-            min_value=0.1,
-            value=50.0,
-            step=5.0,
-            key="mon_pct_tp_inline"
-        )
-        pct_sl_mon = col_sl_f.number_input(
-            "Stop Loss (%)",
-            min_value=0.1,
-            value=200.0,
-            step=25.0,
-            key="mon_pct_sl_inline"
-        )
-
-        tp_prev = round((pct_tp_mon / 100.0) * credito_mon, 2)
-        sl_prev = round((pct_sl_mon / 100.0) * credito_mon, 2)
-        st.info(f"📐 Con estos parámetros: **TP** al ganar **+`${tp_prev}** · **SL** al perder **-`${sl_prev}**")
-
-        col_act, col_skip = st.columns([2, 1])
-        if col_act.button("▶ Activar Monitor de Salida", type="primary", key="btn_activar_monitor_inline"):
-            estado_mon = obtener_estado_monitor()
-            estado_mon["activo"]          = True
-            estado_mon["ticker"]          = opm['ticker']
-            estado_mon["vencimiento"]     = opm['vencimiento']
-            estado_mon["strikes"]         = opm['strikes']
-            estado_mon["credito_inicial"] = credito_mon
-            estado_mon["pct_tp"]          = float(pct_tp_mon)
-            estado_mon["pct_sl"]          = float(pct_sl_mon)
-            estado_mon["pnl_actual"]      = None
-            estado_mon["ultimo_evento"]   = None
-
-            db.registrar_evento("MONITOR_ACTIVADO", f"Ticker:{opm['ticker']} | OrderId:{opm['order_id']} | Crédito:`${credito_mon} | TP:{pct_tp_mon}% | SL:{pct_sl_mon}%")
-            enviar_alerta_webhook(
-                "🎯 Monitor de Salida Activado",
-                f"**Ticker:** {opm['ticker']} · **OrderId:** {opm['order_id']}\n**Crédito cobrado:** `${credito_mon}\n**Take Profit:** {pct_tp_mon}% → cerrar al ganar +`${tp_prev}\n**Stop Loss:** {pct_sl_mon}% → cerrar al perder -`${sl_prev}\nMonitorización activa cada 15 segundos.",
-                "info"
-            )
-            del st.session_state['orden_pendiente_monitor']
-            st.rerun()
-
-        if col_skip.button("⏩ Omitir (sin monitor)", key="btn_skip_monitor_inline"):
-            del st.session_state['orden_pendiente_monitor']
-            st.rerun()
-
-with tabs[0]:
-    st.header("Resumen de la Cuenta (Paper Trading)")
+    accion_acc = "BUY"
     
-    if conectado:
-        # Obtenemos los datos desde la clase gestora
-        with st.spinner("Sincronizando cuenta con IBKR..."):
-            datos = st.session_state.broker.obtener_resumen_cuenta()
+    st.divider()
+    
+    # Condiciones de Entrada
+    st.subheader("🛠️ Condiciones de Entrada Avanzadas (Watchdog)")
+    st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Activa las condiciones que deben cumplirse antes de que el Watchdog envíe la orden al mercado.</p>", unsafe_allow_html=True)
+
+    _W  = [1.5, 0.7, 1.1, 0.9]  # Anchos idénticos en todas las filas → columnas alineadas
+    _SP = "<div style='height:16px'></div>"  # Separación fija preestablecida
+
+    # Fila: Ventana Horaria
+    _c0, _c1, _c2, _c3 = st.columns(_W)
+    with _c0:
+        act_horario = st.toggle("🕰️ Ventana Horaria", value=False, key="acc_act_horario")
+    if act_horario:
+        tipo_horario = _c1.selectbox("", ["Rango", "Hora Fija"], key="acc_tipo_horario", label_visibility="collapsed")
+        h_ini_acc    = _c2.text_input("", value="15:30", key="acc_h_ini", label_visibility="collapsed")
+        if tipo_horario == "Rango":
+            h_fin_acc = _c3.text_input("", value="22:00", key="acc_h_fin", label_visibility="collapsed")
+        else:
+            try:
+                from datetime import datetime, timedelta
+                h_fin_acc = (datetime.strptime(h_ini_acc, "%H:%M") + timedelta(minutes=10)).strftime("%H:%M")
+            except Exception:
+                h_fin_acc = "23:59"
+    else:
+        h_ini_acc, h_fin_acc = "15:30", "22:00"
+    st.markdown(_SP, unsafe_allow_html=True)
+
+    # Fila: Filtro VIX
+    _c0, _c1, _c2, _c3 = st.columns(_W)
+    with _c0:
+        act_vix = st.toggle("📊 Filtro VIX", value=False, key="acc_act_vix")
+    if act_vix:
+        vix_op_acc  = _c1.selectbox("", ["<", "<=", ">", ">="], key="acc_vix_op", label_visibility="collapsed")
+        vix_val_acc = _c2.number_input("", min_value=1.0, value=20.0, step=0.5, key="acc_vix_val", label_visibility="collapsed")
+    st.markdown(_SP, unsafe_allow_html=True)
+
+    # Fila: Filtro SMA
+    _c0, _c1, _c2, _c3 = st.columns(_W)
+    with _c0:
+        act_sma = st.toggle("📈 Filtro SMA", value=False, key="acc_act_sma")
+    if act_sma:
+        sma_per_acc = _c1.number_input("", min_value=5, value=200, step=5, key="acc_sma_per", label_visibility="collapsed")
+        sma_reg_acc = _c2.selectbox("", ["Precio > SMA", "Precio < SMA"], key="acc_sma_reg", label_visibility="collapsed")
+    st.markdown(_SP, unsafe_allow_html=True)
+
+    # Fila: Precio Disparador
+    _c0, _c1, _c2, _c3 = st.columns(_W)
+    with _c0:
+        act_precio = st.toggle("🎯 Precio Disparador", value=False, key="acc_act_precio")
+    if act_precio:
+        op_precio_acc  = _c1.selectbox("", ["<=", ">="], key="acc_precio_op", label_visibility="collapsed")
+        val_precio_acc = _c2.number_input("", min_value=0.0, value=150.0, step=0.5, key="acc_precio_val", label_visibility="collapsed")
+    st.markdown(_SP, unsafe_allow_html=True)
+
+    # Fila: Frecuencia (siempre visible)
+    _c0, _c1, _c2, _c3 = st.columns(_W)
+    with _c0:
+        st.markdown("<p style='margin-top:8px; color:#94a3b8; font-size:0.88rem;'>🔁 Frecuencia</p>", unsafe_allow_html=True)
+    frec_acc = _c1.selectbox("", ["Única", "Diaria", "Semanal"], key="acc_frecuencia", label_visibility="collapsed")
             
-        if datos:
-            col1, col2, col3 = st.columns(3)
-            # st.metric aplica formato automáticamente, ideal para dashboards financieros
-            col1.metric("Net Liquidation", f"${float(datos['NetLiquidation']):,.2f}")
-            col2.metric("Buying Power", f"${float(datos['BuyingPower']):,.2f}")
-            col3.metric("P&L Diario (Irrealizado)", f"${float(datos['DailyPnL']):,.2f}")
-        else:
-            st.warning("Conectado, pero esperando datos de la cuenta...")
-    else:
-        st.info("💡 Conéctate al bróker en la barra lateral para ver los datos de tu cuenta en tiempo real.")
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Net Liquidation", "---")
-        col2.metric("Buying Power", "---")
-        col3.metric("P&L Diario", "---")
-
-    # --- PANEL DE POSICIONES ABIERTAS ---
     st.divider()
-    st.subheader("📂 Posiciones Abiertas en Cartera")
-    st.write("Muestra los contratos actualmente en la cuenta Paper Trading (opciones, acciones, etc.).")
-
-    # Inicializamos el cache de posiciones en session_state para no consultar en cada rerun
-    if 'posiciones_cartera' not in st.session_state:
-        st.session_state['posiciones_cartera'] = None
-
-    if st.button("🔄 Actualizar Posiciones", key="btn_actualizar_cartera"):
-        if not conectado:
-            st.warning("⚠️ Debes estar conectado al bróker para consultar la cartera.")
-        else:
-            with st.spinner("Consultando posiciones en IBKR..."):
-                st.session_state['posiciones_cartera'] = st.session_state.broker.obtener_posiciones_cartera()
-
-    posiciones = st.session_state.get('posiciones_cartera')
-
-    if posiciones is None:
-        st.info("Pulsa 'Actualizar Posiciones' para cargar los datos del bróker.")
-    elif len(posiciones) == 0:
-        st.success("✅ Sin posiciones abiertas en la cuenta. La cartera está en efectivo.")
-    else:
-        import pandas as pd
-        df_posiciones = pd.DataFrame(posiciones)
-        st.dataframe(
-            df_posiciones,
-            use_container_width=True,
-            hide_index=True
-        )
-
-with tabs[2]:
-    st.header("📊 Consola de Monitorización y Auditoría")
-    st.write("Historial de actividad y decisiones del motor algorítmico.")
-
-    # 1. OBTENCIÓN DE DATOS
-    # Llamamos al método de la base de datos
-    df_logs = db.obtener_logs()
-
-    if df_logs is not None and not df_logs.empty:
-        # 2. CÁLCULO DE MÉTRICAS ESTADÍSTICAS (Resumen rápido)
-        total_eventos = len(df_logs)
-        accesos = len(df_logs[df_logs['evento'] == 'LOGIN_EXITOSO'])
-        autorizadas = len(df_logs[df_logs['evento'] == 'ESTRATEGIA_AUTORIZADA'])
-        bloqueadas = len(df_logs[df_logs['evento'] == 'ESTRATEGIA_BLOQUEADA'])
-
-        # Mostrar métricas en columnas profesionales
-        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-        col_m1.metric("Total Eventos", total_eventos)
-        col_m2.metric("Accesos", accesos)
-        col_m3.metric("Autorizadas ✅", autorizadas)
-        col_m4.metric("Bloqueadas ⛔", bloqueadas, delta_color="inverse")
-
-        st.divider()
-
-        # 3. BOTÓN DE ACTUALIZACIÓN Y EXPORTACIÓN
-        col_btn1, col_btn2 = st.columns([1, 4])
-        with col_btn1:
-            if st.button("🔄 Refrescar Logs de Auditoría"):
-                st.rerun()
-        with col_btn2:
-            csv_logs = df_logs.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Exportar Logs a CSV",
-                data=csv_logs,
-                file_name="auditoria_logs_tfg.csv",
-                mime="text/csv",
-            )
-
-        # 4. VISUALIZACIÓN DE LA TABLA DE LOGS
-        st.subheader("Registro Detallado de Actividad")
-        st.dataframe(
-            df_logs,
-            use_container_width=True,
-            column_config={
-                "fecha": st.column_config.DatetimeColumn(
-                    "Marca de Tiempo",
-                    format="D MMM YYYY, HH:mm:ss",
-                ),
-                "evento": "Tipo de Evento",
-                "detalles": "Información del Motor"
-            },
-            hide_index=True # Ocultamos el índice para que parezca una tabla limpia
-        )
-        
-    else:
-        st.info("📭 Aún no se han registrado eventos en la base de datos. Los registros aparecerán aquí conforme el sistema opere.")
-        if st.button("Actualizar"):
-            st.rerun()
-
-    # --- HISTORIAL DE OPERACIONES EJECUTADAS ---
-    st.divider()
-    st.subheader("📂 Historial de Órdenes Ejecutadas (BAG)")
-    st.write("Registro financiero permanente de todas las órdenes Iron Condor transmitidas al bróker.")
-
-    df_ops = db.obtener_operaciones()
-
-    if df_ops is not None and not df_ops.empty:
-        total_ops    = len(df_ops)
-        credito_total = df_ops['credito'].sum()
-        beneficio_max = df_ops['max_beneficio'].sum()
-        riesgo_max    = df_ops['max_riesgo'].sum()
-
-        o1, o2, o3, o4 = st.columns(4)
-        o1.metric("Órdenes Enviadas",   total_ops)
-        o2.metric("Crédito Total",       f"${credito_total:.2f}")
-        o3.metric("Benef. Máx. Acum.",  f"${beneficio_max:.2f}")
-        o4.metric("Riesgo Máx. Acum.",  f"${riesgo_max:.2f}",   delta_color="inverse")
-
-        # Exportación CSV del historial de operaciones
-        csv_ops = df_ops.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Exportar Historial a CSV",
-            data=csv_ops,
-            file_name="historial_operaciones_tfg.csv",
-            mime="text/csv",
-        )
-
-        st.dataframe(
-            df_ops,
-            use_container_width=True,
-            column_config={
-                "fecha":         st.column_config.DatetimeColumn("Fecha",       format="D MMM YYYY, HH:mm:ss"),
-                "order_id":      st.column_config.NumberColumn("OrderId",       format="%d"),
-                "ticker":        "Ticker",
-                "vencimiento":   "Vencimiento",
-                "put_long":      st.column_config.NumberColumn("Put Long",      format="%.0f"),
-                "put_short":     st.column_config.NumberColumn("Put Short",     format="%.0f"),
-                "call_short":    st.column_config.NumberColumn("Call Short",    format="%.0f"),
-                "call_long":     st.column_config.NumberColumn("Call Long",     format="%.0f"),
-                "credito":       st.column_config.NumberColumn("Crédito/acc",  format="$%.2f"),
-                "max_beneficio": st.column_config.NumberColumn("Benef. Máx.",  format="$%.2f"),
-                "max_riesgo":    st.column_config.NumberColumn("Riesgo Máx.",  format="$%.2f"),
-                "status":        "Estado",
-            },
-            hide_index=True
-        )
-
-        # --- BLOQUE DE CANCELACIÓN DE ORDEN ---
-        st.divider()
-        st.subheader("❌ Cancelar Orden Abierta")
-        st.write(
-            "Introduce el **OrderId** de una orden en estado `Submitted` para solicitar su cancelación al bróker. "
-            "Solo tienen efecto las órdenes que aún no han sido ejecutadas."
-        )
-
-        # Inicializamos el estado del flujo de confirmación de cancelación
-        if 'cancelacion_pendiente' not in st.session_state:
-            st.session_state['cancelacion_pendiente'] = None
-
-        col_cancel_input, col_cancel_btn = st.columns([2, 1])
-        order_id_a_cancelar = col_cancel_input.number_input(
-            "OrderId a cancelar", min_value=1, step=1, value=1, key="input_cancel_id"
-        )
-        if col_cancel_btn.button("🗑️ Solicitar Cancelación", key="btn_solicitar_cancelacion"):
-            if not conectado:
-                st.warning("⚠️ Debes estar conectado al bróker para cancelar órdenes.")
-            else:
-                # Guardamos en session_state para sobrevivir al rerun (patrón idéntico al de ejecución)
-                st.session_state['cancelacion_pendiente'] = int(order_id_a_cancelar)
-                st.rerun()
-
-        # Bloque de confirmación — solo aparece cuando hay una cancelación pendiente de validar
-        if st.session_state.get('cancelacion_pendiente') is not None:
-            oid = st.session_state['cancelacion_pendiente']
-            st.warning(
-                f"⚠️ ZONA DE CANCELACIÓN — Vas a solicitar la cancelación de la orden "
-                f"**#{oid}** en el bróker. Esta acción es irreversible si la orden está activa."
-            )
-            col_conf, col_abort = st.columns(2)
-            if col_conf.button("✅ CONFIRMAR CANCELACIÓN", type="primary", key="btn_confirmar_cancel"):
-                with st.status("📡 Enviando cancelación al Gateway IBKR...", expanded=True) as status_cancel:
-                    resultado_cancel = st.session_state.broker.cancelar_orden(oid)
-                    if resultado_cancel['exito']:
-                        status_cancel.update(label=f"✅ Cancelación enviada — Orden #{oid}", state="complete")
-                        st.success(resultado_cancel['mensaje'])
-                        db.registrar_evento("ORDEN_CANCELADA", f"OrderId:{oid} | Solicitud de cancelación emitida.")
-                        enviar_alerta_webhook(
-                            "🗑️ Solicitud de Cancelación", 
-                            f"El usuario ha solicitado manualmente la cancelación de la orden **#{oid}** a través del Dashboard.", 
-                            "warning"
-                        )
-                    else:
-                        status_cancel.update(label="⚠️ No se pudo cancelar", state="error")
-                        st.error(resultado_cancel['mensaje'])
-                st.session_state['cancelacion_pendiente'] = None
-                st.rerun()
-            if col_abort.button("✖️ Abortar", key="btn_abort_cancel"):
-                st.session_state['cancelacion_pendiente'] = None
-                st.rerun()
-
-    else:
-        st.info("📦 Aún no se han ejecutado órdenes en esta sesión. Las órdenes BAG enviadas al bróker aparecerán aquí.")
-
-    st.divider()
-    st.subheader("🎯 Estado del Monitor de Salida (TP/SL)")
-
-    estado_monitor = obtener_estado_monitor()
-    activo   = estado_monitor["activo"]
-    pnl_disp = estado_monitor["pnl_actual"]
-    ult_ev   = estado_monitor["ultimo_evento"]
-
-    if activo:
-        estado_txt  = "🟢 ACTIVO"
-        estado_help = "El Watchdog está monitorizando la posición cada 15 segundos."
-    elif ult_ev == "TAKE_PROFIT":
-        estado_txt  = "✅ CERRADO (Take Profit)"
-        estado_help = "El monitor ejecutó el cierre automático por Take Profit."
-    elif ult_ev == "STOP_LOSS":
-        estado_txt  = "🛑 CERRADO (Stop Loss)"
-        estado_help = "El monitor ejecutó el cierre automático por Stop Loss."
-    else:
-        estado_txt  = "⚫ INACTIVO"
-        estado_help = "Sin monitor activo. Actívalo en \"Nueva Estrategia\" tras enviar una orden."
-
-    col_ms1, col_ms2, col_ms3 = st.columns(3)
-    col_ms1.metric(label="Estado del Monitor", value=estado_txt, help=estado_help)
-
-    if activo or ult_ev:
-        tp_usd = round((estado_monitor["pct_tp"] / 100.0) * estado_monitor["credito_inicial"], 2)
-        sl_usd = round(-(estado_monitor["pct_sl"] / 100.0) * estado_monitor["credito_inicial"], 2)
-        col_ms2.metric(label=f"Umbral TP ({estado_monitor['pct_tp']}%)", value=f"+`${tp_usd}")
-        col_ms3.metric(label=f"Umbral SL ({estado_monitor['pct_sl']}%)", value=f"`${sl_usd}", delta_color="inverse")
-
-    if pnl_disp is not None:
-        st.metric(label=f"P&L Actual — {estado_monitor['ticker']} (IBKR)", value=f"`${pnl_disp}", delta=f"`${pnl_disp}", delta_color="normal")
-
-    if activo:
-        st.write(f"**Posición monitorizada:** `{estado_monitor['ticker']}` · Venc: `{estado_monitor['vencimiento']}` · Strikes: `{estado_monitor['strikes']}`")
-        if st.button("⏹ Detener Monitor", key="btn_detener_monitor"):
-            estado_monitor["activo"]       = False
-            estado_monitor["ultimo_evento"] = None
-            db.registrar_evento("MONITOR_DETENIDO", f"El operador ha detenido manualmente el Monitor de Salida para {estado_monitor['ticker']}.")
-            enviar_alerta_webhook("⏹ Monitor de Salida Detenido", f"El operador ha detenido manualmente el Watchdog de Salida para **{estado_monitor['ticker']}**. La posición NO ha sido cerrada.", "warning")
-            st.rerun()
-    elif not ult_ev:
-        st.info("💡 Para activar el monitor, envía una orden en **Nueva Estrategia** y configura el TP/SL justo después.")
-
-with tabs[3]:
-    st.header("🧪 Backtesting Visual (Data Science)")
-    st.write("Simulación retrospectiva del algoritmo SMA sobre el histórico anual del subyacente. Permite validar visualmente las reglas de entrada antes de operar en tiempo real.")
     
-    col_bt1, col_bt2, col_bt3 = st.columns(3)
-    ticker_bt = col_bt1.text_input("Ticker para simulación", value="SPY", key="ticker_bt").upper()
-    periodo_bt = col_bt2.number_input("Periodo SMA", min_value=10, max_value=300, value=200, step=10, key="periodo_bt")
-    regla_bt = col_bt3.selectbox("Regla de Trading", ["Precio > SMA", "Precio < SMA"], key="regla_bt")
+    # Condiciones de Salida
+    st.subheader("🎯 Condiciones de Salida Avanzadas (Gestión de Riesgo)")
+    st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Activa y configura las reglas de gestión de riesgo que vigilará el Watchdog de Salidas.</p>", unsafe_allow_html=True)
+
+    _W  = [1.5, 0.7, 1.1, 0.9]
+    _SP = "<div style='height:16px'></div>"
+
+    # Fila: Stop Loss / Take Profit
+    _c0, _c1, _c2, _c3 = st.columns(_W)
+    with _c0:
+        act_sl_tp = st.toggle("🎯 Stop Loss / Take Profit", value=False, key="acc_act_sl_tp")
+    if act_sl_tp:
+        stop_loss_acc   = _c1.number_input("", value=-200.0, step=10.0, key="acc_sl_val", label_visibility="collapsed")
+        take_profit_acc = _c2.number_input("", value=400.0, step=10.0, key="acc_tp_val", label_visibility="collapsed")
+        dest_gestion    = _c3.selectbox("", ["App (Watchdog)", "IBKR (Broker)"], key="acc_gestion_sl_tp", label_visibility="collapsed")
+    st.markdown(_SP, unsafe_allow_html=True)
+
+    # Fila: Cerrar por VIX
+    _c0, _c1, _c2, _c3 = st.columns(_W)
+    with _c0:
+        act_vix_salida = st.toggle("🚨 Cerrar por VIX", value=False, key="acc_act_vix_salida")
+    if act_vix_salida:
+        vix_max_acc = _c1.number_input("", min_value=1.0, value=30.0, step=0.5, key="acc_vix_max", label_visibility="collapsed")
+    st.markdown(_SP, unsafe_allow_html=True)
+
+    # Fila: Cerrar por SMA
+    _c0, _c1, _c2, _c3 = st.columns(_W)
+    with _c0:
+        act_sma_salida = st.toggle("📈 Cerrar por SMA", value=False, key="acc_act_sma_salida")
+    if act_sma_salida:
+        sma_per_sal = _c1.number_input("", min_value=5, value=200, step=5, key="acc_sma_per_sal", label_visibility="collapsed")
+        sma_reg_sal = _c2.selectbox("", ["Precio < SMA", "Precio > SMA"], key="acc_sma_reg_sal", label_visibility="collapsed")
+    st.markdown(_SP, unsafe_allow_html=True)
+
+    # Fila: Hora Forzada
+    _c0, _c1, _c2, _c3 = st.columns(_W)
+    with _c0:
+        act_hora_salida = st.toggle("⏰ Hora Forzada", value=False, key="acc_act_hora_salida")
+    if act_hora_salida:
+        hora_sal_acc = _c1.text_input("", value="21:45", key="acc_hora_sal", label_visibility="collapsed")
+            
+    st.markdown("<br>", unsafe_allow_html=True)
+    submit_acc = st.button("Encolar Estrategia Acciones", width="stretch", key="btn_encolar_acciones")
     
-    if st.button("Ejecutar Backtest Anual", key="btn_run_backtest"):
-        with st.spinner(f"Descargando datos anuales de {ticker_bt} y simulando el motor..."):
-            import yfinance as yf
-            import plotly.graph_objects as go
-            import pandas as pd
+    if submit_acc:
+        if not ticker_acc:
+            st.error("Por favor, introduce un ticker válido.")
+        else:
+            # Serializamos las condiciones
+            cond_entrada = {}
+            if act_horario:
+                cond_entrada["horario"] = {"activo": True, "hora_inicio": h_ini_acc, "hora_fin": h_fin_acc}
+            if act_vix:
+                cond_entrada["vix"] = {"activo": True, "valor": float(vix_val_acc), "operador": vix_op_acc}
+            if act_sma:
+                cond_entrada["sma"] = {"activo": True, "periodo": int(sma_per_acc), "regla": sma_reg_acc}
+            if act_precio:
+                cond_entrada["precio_disparador"] = {"activo": True, "valor": float(val_precio_acc), "operador": op_precio_acc}
+            # Frecuencia de ejecución
+            cond_entrada["frecuencia"] = {"activo": (frec_acc != "Única"), "tipo": frec_acc}
+                
+            cond_salida = {}
+            if act_sl_tp:
+                cond_salida["stop_loss"] = float(stop_loss_acc)
+                cond_salida["take_profit"] = float(take_profit_acc)
+                cond_salida["gestion"] = dest_gestion
+            if act_vix_salida:
+                cond_salida["vix_maximo"] = float(vix_max_acc)
+            if act_sma_salida:
+                cond_salida["sma"] = {"activo": True, "periodo": int(sma_per_sal), "regla": sma_reg_sal}
+            if act_hora_salida:
+                cond_salida["cierre_horario"] = hora_sal_acc
+                
+            # Definimos la pata única
+            patas = [{"tipo_activo": "STOCK", "accion": accion_acc, "cantidad": int(cant_acc)}]
             
             try:
-                # 1. Descarga de datos masiva
-                ticker_obj = yf.Ticker(ticker_bt)
-                df_bt = ticker_obj.history(period="1y")
+                est_id = db.crear_estrategia(
+                    ticker=ticker_acc,
+                    tipo_activo="STOCK",
+                    estado="PENDIENTE_ENTRADA",
+                    patas=patas,
+                    condiciones_entrada=cond_entrada if cond_entrada else None,
+                    condiciones_salida=cond_salida if cond_salida else None,
+                    precio_entrada=precio_limite_acc
+                )
                 
-                if df_bt.empty:
-                    st.error(f"No se encontraron datos históricos para {ticker_bt}. Yahoo Finance podría estar limitando las peticiones.")
-                else:
-                    # Garantizar compatibilidad con yfinance multi-index (versiones recientes)
-                    if isinstance(df_bt.columns, pd.MultiIndex):
-                        close_col = df_bt['Close'].iloc[:, 0]
-                    else:
-                        close_col = df_bt['Close']
-                        
-                    # 2. Vectorización matemática (Análisis Cuantitativo)
-                    df_res = pd.DataFrame(index=df_bt.index)
-                    df_res['Close'] = close_col
-                    df_res['SMA'] = df_res['Close'].rolling(window=periodo_bt).mean()
-                    
-                    # 3. Vectorización de la regla lógica (Filtro Algorítmico)
-                    if regla_bt == "Precio > SMA":
-                        df_res['Autorizado'] = df_res['Close'] > df_res['SMA']
-                    else:
-                        df_res['Autorizado'] = df_res['Close'] < df_res['SMA']
-                        
-                    # 4. Cálculo de transiciones de estado (Derivada discreta)
-                    df_res['Cruce'] = df_res['Autorizado'].astype(int).diff()
-                    
-                    puntos_verdes = df_res[df_res['Cruce'] == 1]
-                    puntos_rojos = df_res[df_res['Cruce'] == -1]
-                    
-                    # 5. Generación del gráfico interactivo (Data Visualization)
-                    fig = go.Figure()
-                    
-                    # Línea de Precio
-                    fig.add_trace(go.Scatter(
-                        x=df_res.index, y=df_res['Close'],
-                        mode='lines', name='Precio (Close)',
-                        line=dict(color='#2E86C1', width=2)
-                    ))
-                    
-                    # Línea SMA
-                    fig.add_trace(go.Scatter(
-                        x=df_res.index, y=df_res['SMA'],
-                        mode='lines', name=f'SMA {periodo_bt}',
-                        line=dict(color='#F39C12', width=2, dash='dash')
-                    ))
-                    
-                    # Marcadores de Acción
-                    fig.add_trace(go.Scatter(
-                        x=puntos_verdes.index, y=puntos_verdes['Close'],
-                        mode='markers', name='Filtro OK (Entrar)',
-                        marker=dict(color='green', size=12, symbol='triangle-up', line=dict(width=1, color='DarkSlateGrey'))
-                    ))
-                    
-                    fig.add_trace(go.Scatter(
-                        x=puntos_rojos.index, y=puntos_rojos['Close'],
-                        mode='markers', name='Filtro Bloqueado (No Entrar)',
-                        marker=dict(color='red', size=12, symbol='triangle-down', line=dict(width=1, color='DarkSlateGrey'))
-                    ))
-                    
-                    fig.update_layout(
-                        title=f'Backtest Visual - Dinámica de Autorización para {ticker_bt} (Último Año)',
-                        xaxis_title='Fecha',
-                        yaxis_title='Precio USD',
-                        hovermode='x unified',
-                        template='plotly_white',
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                        margin=dict(l=0, r=0, t=50, b=0)
-                    )
-                    
-                    st.plotly_chart(fig, width='stretch', config={'scrollZoom': True})
-                    
-                    # 6. Dashboard Analítico
-                    st.subheader("📊 Métricas de la Simulación")
-                    c1, c2, c3 = st.columns(3)
-                    
-                    # Eliminamos los NaNs iniciales producidos por el rolling() de la SMA
-                    df_clean = df_res.dropna()
-                    dias_totales = len(df_clean)
-                    dias_autorizados = df_clean['Autorizado'].sum()
-                    porcentaje_autorizado = (dias_autorizados / dias_totales) * 100 if dias_totales > 0 else 0
-                    
-                    c1.metric("Días Evaluados (post-SMA)", dias_totales)
-                    c2.metric("Días con Filtro Autorizado", dias_autorizados)
-                    c3.metric("Exposición Teórica al Mercado", f"{porcentaje_autorizado:.1f}%")
-                    
+                st.success(f"🚀 Estrategia de acciones #{est_id} encolada con éxito en estado PENDIENTE_ENTRADA.")
+                db.registrar_evento("CREACION_ESTRATEGIA_UI", f"Estrategia #{est_id} ({ticker_acc}) encolada desde UI.")
+                
+                # Discord alert
+                target_p = f"${precio_limite_acc:.2f} (Límite)" if precio_limite_acc is not None else "Mercado"
+                enviar_alerta_webhook(
+                    titulo="📥 Nueva Estrategia Encolada (Acciones)",
+                    mensaje=f"**ID:** {est_id}\n**Ticker:** {ticker_acc}\n**Acción:** {accion_acc}\n**Cantidad:** {cant_acc}\n**Precio Target:** {target_p}\n**Frecuencia:** {frec_acc}",
+                    color="info"
+                )
             except Exception as e:
-                st.error(f"Error interno durante la simulación: {e}")
-
+                st.error(f"Error al encolar estrategia: {e}")
+
+
+
+# ==========================================
+# TAB 3: OPCIONES (CONSTRUCTOR MULTILEG)
+# ==========================================
+with tabs[2]:
+    st.header("Constructor de Opciones Multileg")
+    st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Crea combinaciones complejas de opciones (Spreads, Iron Condors, Straddles) y simula su payoff en caliente.</p>", unsafe_allow_html=True)
+    
+    # Manejo de estado de las patas
+    if "patas_opciones" not in st.session_state:
+        # Pre-cargar un Iron Condor de muestra para impresionar
+        st.session_state["patas_opciones"] = [
+            {"tipo_activo": "OPTION", "accion": "BUY", "cantidad": 1, "strike": 90.0, "right": "P", "vencimiento": date.today(), "precio_entrada": 1.50},
+            {"tipo_activo": "OPTION", "accion": "SELL", "cantidad": 1, "strike": 95.0, "right": "P", "vencimiento": date.today(), "precio_entrada": 3.20},
+            {"tipo_activo": "OPTION", "accion": "SELL", "cantidad": 1, "strike": 105.0, "right": "C", "vencimiento": date.today(), "precio_entrada": 2.80},
+            {"tipo_activo": "OPTION", "accion": "BUY", "cantidad": 1, "strike": 110.0, "right": "C", "vencimiento": date.today(), "precio_entrada": 1.10}
+        ]
+        
+    opt_ticker = st.text_input("Ticker Subyacente Opciones", value="SPY").upper()
+    
+    # Caché de precio para Opciones (evita consultas lentas en reruns de sliders)
+    if "opt_ticker_previo" not in st.session_state:
+        st.session_state["opt_ticker_previo"] = ""
+    if "precio_subyacente_opt" not in st.session_state:
+        st.session_state["precio_subyacente_opt"] = None
+
+    if opt_ticker != st.session_state["opt_ticker_previo"]:
+        st.session_state["opt_ticker_previo"] = opt_ticker
+        if st.session_state.broker.esta_conectado():
+            try:
+                with st.spinner(f"Consultando cotización actual de {opt_ticker}..."):
+                    precio = st.session_state.broker.obtener_precio_prueba(opt_ticker)
+                    if precio:
+                        st.session_state["precio_subyacente_opt"] = precio
+                    else:
+                        st.session_state["precio_subyacente_opt"] = None
+            except:
+                st.session_state["precio_subyacente_opt"] = None
+        else:
+            st.session_state["precio_subyacente_opt"] = None
+    
+    st.subheader("Configuración de las Patas (Legs)")
+    
+    # Renderizamos una única cabecera para toda la tabla
+    col_h1, col_h2, col_h3, col_h4, col_h5, col_h6, col_h7 = st.columns([1.8, 1.8, 1.5, 1.2, 1.5, 2.0, 1.0])
+    col_h1.markdown("<small style='font-weight: 600; color: #94a3b8;'>ACCIÓN</small>", unsafe_allow_html=True)
+    col_h2.markdown("<small style='font-weight: 600; color: #94a3b8;'>TIPO</small>", unsafe_allow_html=True)
+    col_h3.markdown("<small style='font-weight: 600; color: #94a3b8;'>STRIKE ($)</small>", unsafe_allow_html=True)
+    col_h4.markdown("<small style='font-weight: 600; color: #94a3b8;'>RATIO (QTY)</small>", unsafe_allow_html=True)
+    col_h5.markdown("<small style='font-weight: 600; color: #94a3b8;'>PRIMA ($)</small>", unsafe_allow_html=True)
+    col_h6.markdown("<small style='font-weight: 600; color: #94a3b8;'>VENCIMIENTO</small>", unsafe_allow_html=True)
+    col_h7.markdown("<small style='font-weight: 600; color: #94a3b8;'>ELIM.</small>", unsafe_allow_html=True)
+    
+    patas_eliminar = []
+    
+    # Formulario dinámico por pata (sin etiquetas repetitivas para máxima limpieza)
+    for idx, pata in enumerate(st.session_state["patas_opciones"]):
+        col_act, col_right, col_strike, col_qty, col_prem, col_venc, col_del = st.columns([1.8, 1.8, 1.5, 1.2, 1.5, 2.0, 1.0])
+        
+        # 1. Segmented Control Acción (SELL/BUY)
+        accion_opt = col_act.segmented_control(
+            f"Acción #{idx+1}",
+            options=["SELL", "BUY"],
+            default=pata["accion"],
+            key=f"leg_act_{idx}",
+            label_visibility="collapsed"
+        )
+        if accion_opt:
+            pata["accion"] = accion_opt
+            
+        # 2. Segmented Control Tipo (CALL/PUT)
+        current_right = "CALL" if pata["right"] == "C" else "PUT"
+        right_opt = col_right.segmented_control(
+            f"C/P #{idx+1}",
+            options=["CALL", "PUT"],
+            default=current_right,
+            key=f"leg_r_{idx}",
+            label_visibility="collapsed"
+        )
+        if right_opt:
+            pata["right"] = "C" if right_opt == "CALL" else "P"
+            
+        # 3. Strike Input (Label collapsed)
+        pata["strike"] = col_strike.number_input(
+            f"Strike #{idx+1}", 
+            min_value=0.1, 
+            value=float(pata["strike"]), 
+            step=1.0, 
+            key=f"leg_k_{idx}",
+            label_visibility="collapsed"
+        )
+        
+        # 4. Ratio/Quantity Input (Label collapsed)
+        pata["cantidad"] = col_qty.number_input(
+            f"Ratio #{idx+1}", 
+            min_value=1, 
+            value=int(pata["cantidad"]), 
+            step=1, 
+            key=f"leg_q_{idx}",
+            label_visibility="collapsed"
+        )
+        
+        # 5. Prima Input (Label collapsed)
+        pata["precio_entrada"] = col_prem.number_input(
+            f"Prima #{idx+1}", 
+            min_value=0.01, 
+            value=float(pata["precio_entrada"]), 
+            step=0.05, 
+            key=f"leg_p_{idx}",
+            label_visibility="collapsed"
+        )
+        
+        # 6. Vencimiento (Label collapsed)
+        venc_val = pata["vencimiento"]
+        if isinstance(venc_val, str):
+            try:
+                venc_val = datetime.strptime(venc_val, "%Y-%m-%d").date()
+            except:
+                venc_val = date.today()
+        pata["vencimiento"] = col_venc.date_input(
+            f"Venc. #{idx+1}", 
+            value=venc_val, 
+            key=f"leg_v_{idx}",
+            label_visibility="collapsed"
+        )
+        
+        # 7. Botón Borrar Pata (Estilizado como cruz roja en columna 7)
+        if col_del.button("X", key=f"leg_del_{idx}"):
+            patas_eliminar.append(idx)
+            
+    # Eliminar patas marcadas
+    if patas_eliminar:
+        for index in sorted(patas_eliminar, reverse=True):
+            st.session_state["patas_opciones"].pop(index)
+        st.rerun()
+        
+    # Añadir nueva pata
+    col_add, _ = st.columns([1.5, 8.5])
+    if col_add.button("➕ Añadir Pata", width="stretch"):
+        if st.session_state["patas_opciones"]:
+            nueva_pata = st.session_state["patas_opciones"][-1].copy()
+        else:
+            nueva_pata = {"tipo_activo": "OPTION", "accion": "BUY", "cantidad": 1, "strike": 100.0, "right": "C", "vencimiento": date.today(), "precio_entrada": 1.0}
+        st.session_state["patas_opciones"].append(nueva_pata)
+        st.rerun()
+        
+    # Inject invisible JS iframe to dynamically classify option leg buttons in the parent DOM
+    st.components.v1.html("""
+    <script>
+    (function() {
+        const parentDoc = window.parent.document;
+        function applyLegButtonStyles() {
+            const rows = parentDoc.querySelectorAll('div[data-testid="stHorizontalBlock"]');
+            rows.forEach(row => {
+                const col1 = row.querySelector('> div:nth-child(1)');
+                const col2 = row.querySelector('> div:nth-child(2)');
+                if (!col1 || !col2) return;
+                
+                const actionButtons = col1.querySelectorAll('button[data-testid^="stBaseButton-segmented_control"]');
+                const rightButtons = col2.querySelectorAll('button[data-testid^="stBaseButton-segmented_control"]');
+                
+                let hasSellActive = false;
+                let hasBuyActive = false;
+                
+                actionButtons.forEach(button => {
+                    const text = button.textContent.trim().toUpperCase();
+                    const isActive = button.getAttribute('data-testid') === 'stBaseButton-segmented_controlActive' ||
+                                     button.getAttribute('aria-checked') === 'true' || 
+                                     button.getAttribute('aria-selected') === 'true' || 
+                                     button.getAttribute('aria-pressed') === 'true' ||
+                                     button.classList.contains('e1mwqyj913');
+                    
+                    if (text === 'SELL') {
+                        button.classList.add('btn-sell');
+                        if (isActive) hasSellActive = true;
+                    } else if (text === 'BUY') {
+                        button.classList.add('btn-buy');
+                        if (isActive) hasBuyActive = true;
+                    }
+                });
+                
+                rightButtons.forEach(button => {
+                    const text = button.textContent.trim().toUpperCase();
+                    if (text === 'CALL') {
+                        button.classList.add('btn-call');
+                    } else if (text === 'PUT') {
+                        button.classList.add('btn-put');
+                    }
+                });
+                
+                if (hasSellActive) {
+                    row.classList.add('row-action-sell');
+                    row.classList.remove('row-action-buy');
+                } else if (hasBuyActive) {
+                    row.classList.add('row-action-buy');
+                    row.classList.remove('row-action-sell');
+                } else {
+                    row.classList.remove('row-action-sell', 'row-action-buy');
+                }
+            });
+        }
+
+        applyLegButtonStyles();
+        
+        if (!window.parent.legObserverAttached) {
+            const observer = new MutationObserver(() => {
+                applyLegButtonStyles();
+            });
+            observer.observe(parentDoc.body, { childList: true, subtree: true });
+            window.parent.legObserverAttached = true;
+        }
+    })();
+    </script>
+    """, height=0, width=0)
+        
+    # --- GRÁFICO INTERACTIVO DE PLOTLY (SENSIVILIDAD Y VALOR TEMPORAL) ---
+    if st.session_state["patas_opciones"]:
+        st.divider()
+        st.subheader("📊 Análisis de Sensibilidad Teórico (Black-Scholes)")
+        st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Mueve los deslizadores para ver el efecto del paso del tiempo y la volatilidad implícita en la curva teórica.</p>", unsafe_allow_html=True)
+        
+        c_sl1, c_sl2, c_sl3 = st.columns(3)
+        vol_sim = c_sl1.slider("Volatilidad Implícita (σ)", min_value=5, max_value=150, value=25, step=5, format="%d%%", key="opt_vol_sim") / 100.0
+        dias_sim = c_sl2.slider("Días al Vencimiento (T)", min_value=0, max_value=365, value=45, step=1, key="opt_dias_sim")
+        tasa_sim = c_sl3.slider("Tasa Libre de Riesgo (r)", min_value=0.0, max_value=15.0, value=5.0, step=0.5, format="%.1f%%", key="opt_tasa_sim") / 100.0
+        
+        # Calcular límites del subyacente para el gráfico
+        k_list = [float(p["strike"]) for p in st.session_state["patas_opciones"]]
+        min_k, max_k = min(k_list), max(k_list)
+        precio_medio_k = (min_k + max_k) / 2.0
+        range_min = float(min_k * 0.75)
+        range_max = float(max_k * 1.25)
+        
+        T_years = max(dias_sim / 365.0, 1e-5)
+        
+        # Calculamos curvas
+        payoff_data = MotorBlackScholes.calcular_payoff_estrategia(
+            patas=st.session_state["patas_opciones"],
+            T=T_years,
+            r=tasa_sim,
+            sigma=vol_sim,
+            precio_min=range_min,
+            precio_max=range_max
+        )
+        
+        # Calcular breakevens exactos por interpolación lineal (T=0)
+        s_base = list(payoff_data["S"])
+        pnl_base = list(payoff_data["pnl_vencimiento"])
+        
+        beps = []
+        for i in range(len(pnl_base) - 1):
+            s1, s2 = s_base[i], s_base[i+1]
+            p1, p2 = pnl_base[i], pnl_base[i+1]
+            if p1 * p2 <= 0:
+                if p1 == 0:
+                    beps.append(s1)
+                elif p2 == 0:
+                    continue
+                else:
+                    s_cross = s1 - p1 * (s2 - s1) / (p2 - p1)
+                    beps.append(s_cross)
+        
+        # Eliminar duplicados muy cercanos para evitar solapamiento de etiquetas
+        beps_filtrados = []
+        for b in sorted(beps):
+            if not beps_filtrados or b - beps_filtrados[-1] > 0.05:
+                beps_filtrados.append(b)
+                
+        # Combinar e insertar los beps de forma ordenada en los arrays para unir los trazos en 0
+        puntos_combinados = []
+        for s_val, p_val in zip(s_base, pnl_base):
+            puntos_combinados.append((s_val, p_val))
+            
+        for bep in beps_filtrados:
+            inserted = False
+            for idx, (s_val, p_val) in enumerate(puntos_combinados):
+                if bep < s_val:
+                    puntos_combinados.insert(idx, (bep, 0.0))
+                    inserted = True
+                    break
+            if not inserted:
+                puntos_combinados.append((bep, 0.0))
+                
+        S_sorted = [p[0] for p in puntos_combinados]
+        pnl_sorted = [p[1] for p in puntos_combinados]
+        
+        # Separar en P&L ganadores (verde) y perdedores (rojo) para la curva T=0
+        y_pos = [p_val if p_val >= 0 else None for p_val in pnl_sorted]
+        y_neg = [p_val if p_val <= 0 else None for p_val in pnl_sorted]
+        
+        # Calcular límites del eje Y con un 15% de holgura considerando ambas curvas
+        all_pnl_values = pnl_base + list(payoff_data["pnl_temporal"])
+        min_pnl = min(all_pnl_values)
+        max_pnl = max(all_pnl_values)
+        pnl_range = max(1.0, max_pnl - min_pnl)
+        y_min_limit = min_pnl - 0.15 * pnl_range
+        y_max_limit = max_pnl + 0.15 * pnl_range
+        
+        fig = go.Figure()
+        
+        # Curva a vencimiento (T = 0) - Tramo Ganador (Verde con relleno verde)
+        fig.add_trace(go.Scatter(
+            x=S_sorted,
+            y=y_pos,
+            mode='lines',
+            name='A Vencimiento (T=0)',
+            line=dict(color='#10b981', width=3.5),
+            fill='tozeroy',
+            fillcolor='rgba(16, 185, 129, 0.2)',
+            connectgaps=False
+        ))
+        
+        # Curva a vencimiento (T = 0) - Tramo Perdedor (Rojo con relleno rojo)
+        fig.add_trace(go.Scatter(
+            x=S_sorted,
+            y=y_neg,
+            mode='lines',
+            name='A Vencimiento (T=0)',
+            line=dict(color='#f43f5e', width=3.5),
+            fill='tozeroy',
+            fillcolor='rgba(244, 63, 94, 0.2)',
+            showlegend=False,
+            connectgaps=False
+        ))
+        
+        # Curva temporal actual (T > 0) - Azul
+        fig.add_trace(go.Scatter(
+            x=payoff_data["S"],
+            y=payoff_data["pnl_temporal"],
+            mode='lines',
+            name=f'Valor Temporal (T={dias_sim} días)',
+            line=dict(color='#6366f1', width=3)
+        ))
+        
+        # Layout premium
+        fig.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            xaxis=dict(
+                title="Precio del Subyacente ($)",
+                gridcolor='rgba(255,255,255,0.05)',
+                zerolinecolor='rgba(255,255,255,0.1)',
+                tickfont=dict(color="#94a3b8")
+            ),
+            yaxis=dict(
+                title="P&L de la Estrategia ($)",
+                gridcolor='rgba(255,255,255,0.05)',
+                zerolinecolor='rgba(255,255,255,0.2)',
+                tickfont=dict(color="#94a3b8"),
+                range=[y_min_limit, y_max_limit]
+            ),
+            legend=dict(
+                font=dict(color="#ffffff"),
+                bgcolor='rgba(0,0,0,0)',
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            ),
+            hovermode='x unified',
+            margin=dict(l=0, r=0, t=10, b=0)
+        )
+        
+        # Línea horizontal en 0$ marcada en blanco
+        fig.add_hline(y=0.0, line_dash="solid", line_color="#ffffff", line_width=1.5)
+        
+        # Líneas verticales para los Breakevens con etiquetas
+        for bep in beps_filtrados:
+            fig.add_vline(
+                x=bep,
+                line_color="#38bdf8",
+                line_width=1.5,
+                line_dash="solid",
+                annotation_text=f"{bep:.2f}",
+                annotation_position="top",
+                annotation_font=dict(color="#38bdf8", size=11, family="Outfit")
+            )
+            
+        # Línea vertical para el valor actual del subyacente (blanca punteada)
+        precio_ref = st.session_state.get("precio_subyacente_opt")
+        if precio_ref is None:
+            precio_ref = precio_medio_k
+            
+        fig.add_vline(
+            x=precio_ref,
+            line_color="#ffffff",
+            line_width=1.5,
+            line_dash="dot",
+            annotation_text=f"Actual: {precio_ref:.2f}" if st.session_state.get("precio_subyacente_opt") else f"Medio: {precio_ref:.2f}",
+            annotation_position="bottom",
+            annotation_font=dict(color="#ffffff", size=10, family="Outfit")
+        )
+        
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        
+        # Cálculo de Greeks agregados teóricos (en el strike medio)
+        precio_medio_k = (min_k + max_k) / 2.0
+        delta_net = 0.0
+        theta_net = 0.0
+        vega_net = 0.0
+        
+        for p in st.session_state["patas_opciones"]:
+            sign = 1 if p["accion"] == "BUY" else -1
+            qty = int(p["cantidad"])
+            g = MotorBlackScholes.calcular_greeks(
+                S=precio_medio_k,
+                K=float(p["strike"]),
+                T=T_years,
+                r=tasa_sim,
+                sigma=vol_sim,
+                tipo=p["right"]
+            )
+            # Las opciones de acciones controlan 100 acciones
+            delta_net += sign * g["delta"] * qty * 100
+            theta_net += sign * g["theta"] * qty * 100
+            vega_net += sign * g["vega"] * qty * 100
+            
+        st.markdown(f"##### 📐 Greeks Teóricos Estimados (Evaluados a ${precio_medio_k:.2f})")
+        col_g1, col_g2, col_g3 = st.columns(3)
+        col_g1.metric("Delta Neto de Cartera (Δ)", f"{delta_net:.2f}", help="Sensibilidad respecto al precio del subyacente")
+        col_g2.metric("Theta Neto Diario (Θ)", f"${theta_net:.2f}", help="Decaimiento temporal diario de la posición")
+        col_g3.metric("Vega Neto (V)", f"${vega_net:.2f}", help="Sensibilidad respecto a cambios del 1% en Volatilidad")
+        
+        # --- PARÁMETROS ALGORÍTMICOS Y ENVÍO ---
+        st.divider()
+        st.subheader("🚀 Parámetros Algorítmicos y Envío")
+        st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Configura el tipo de orden y las condiciones de entrada/salida que vigilará el Watchdog.</p>", unsafe_allow_html=True)
+
+        # Tipo de orden + prima objetivo
+        col_o1, col_o2, col_o3 = st.columns(3)
+        with col_o1:
+            opt_tipo_lmt = st.selectbox("Tipo de Orden", ["Crédito/Débito Neto", "Mercado"], key="opt_tipo_lmt")
+        opt_precio_entrada = None
+        if opt_tipo_lmt == "Crédito/Débito Neto":
+            with col_o2:
+                opt_precio_entrada = st.number_input(
+                    "Prima de Entrada Objetivo ($ neto, crédito = + / débito = -)",
+                    value=0.0, step=0.1, key="opt_prima_obj"
+                )
+
+        st.divider()
+
+        # ── CONDICIONES DE ENTRADA ──────────────────────────────────────────
+        st.subheader("🛠️ Condiciones de Entrada Avanzadas (Watchdog)")
+        st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Activa las condiciones que deben cumplirse antes de que el Watchdog envíe la orden al mercado.</p>", unsafe_allow_html=True)
+
+        _W  = [1.5, 0.7, 1.1, 0.9]
+        _SP = "<div style='height:16px'></div>"
+
+        # Fila: Ventana Horaria
+        _c0, _c1, _c2, _c3 = st.columns(_W)
+        with _c0:
+            opt_act_horario = st.toggle("🕰️ Ventana Horaria", value=False, key="opt_act_horario")
+        if opt_act_horario:
+            opt_tipo_horario = _c1.selectbox("", ["Rango", "Hora Fija"], key="opt_tipo_horario", label_visibility="collapsed")
+            o_h_ini          = _c2.text_input("", value="15:45", key="opt_h_ini", label_visibility="collapsed")
+            if opt_tipo_horario == "Rango":
+                o_h_fin = _c3.text_input("", value="21:30", key="opt_h_fin", label_visibility="collapsed")
+            else:
+                try:
+                    from datetime import timedelta
+                    o_h_fin = (datetime.strptime(o_h_ini, "%H:%M") + timedelta(minutes=10)).strftime("%H:%M")
+                except Exception:
+                    o_h_fin = "23:59"
+        else:
+            o_h_ini, o_h_fin = "15:45", "21:30"
+        st.markdown(_SP, unsafe_allow_html=True)
+
+        # Fila: Filtro VIX
+        _c0, _c1, _c2, _c3 = st.columns(_W)
+        with _c0:
+            opt_act_vix = st.toggle("📊 Filtro VIX", value=False, key="opt_act_vix")
+        if opt_act_vix:
+            opt_vix_op  = _c1.selectbox("", ["<", "<=", ">", ">="], key="opt_vix_op", label_visibility="collapsed")
+            opt_vix_val = _c2.number_input("", min_value=1.0, value=20.0, step=0.5, key="opt_vix_val", label_visibility="collapsed")
+        st.markdown(_SP, unsafe_allow_html=True)
+
+        # Fila: Filtro SMA
+        _c0, _c1, _c2, _c3 = st.columns(_W)
+        with _c0:
+            opt_act_sma = st.toggle("📈 Filtro SMA", value=False, key="opt_act_sma")
+        if opt_act_sma:
+            opt_sma_per = _c1.number_input("", min_value=5, value=200, step=5, key="opt_sma_per", label_visibility="collapsed")
+            opt_sma_reg = _c2.selectbox("", ["Precio > SMA", "Precio < SMA"], key="opt_sma_reg", label_visibility="collapsed")
+        st.markdown(_SP, unsafe_allow_html=True)
+
+        # Fila: Precio Disparador
+        _c0, _c1, _c2, _c3 = st.columns(_W)
+        with _c0:
+            opt_act_precio = st.toggle("🎯 Precio Disparador", value=False, key="opt_act_precio")
+        if opt_act_precio:
+            opt_precio_op  = _c1.selectbox("", ["<=", ">="], key="opt_precio_op", label_visibility="collapsed")
+            opt_precio_val = _c2.number_input("", min_value=0.0, value=100.0, step=0.5, key="opt_precio_val", label_visibility="collapsed")
+        st.markdown(_SP, unsafe_allow_html=True)
+
+        # Fila: Frecuencia (siempre visible)
+        _c0, _c1, _c2, _c3 = st.columns(_W)
+        with _c0:
+            st.markdown("<p style='margin-top:8px; color:#94a3b8; font-size:0.88rem;'>🔁 Frecuencia</p>", unsafe_allow_html=True)
+        opt_frecuencia = _c1.selectbox("", ["Única", "Diaria", "Semanal"], key="opt_frecuencia", label_visibility="collapsed")
+
+        st.divider()
+
+        # ── CONDICIONES DE SALIDA ───────────────────────────────────────────
+        st.subheader("🎯 Condiciones de Salida Avanzadas (Gestión de Riesgo)")
+        st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Activa y configura las reglas de gestión de riesgo que vigilará el Watchdog de Salidas.</p>", unsafe_allow_html=True)
+
+        _W  = [1.5, 0.7, 1.1, 0.9]
+        _SP = "<div style='height:16px'></div>"
+
+        # Fila: Stop Loss / Take Profit
+        _c0, _c1, _c2, _c3 = st.columns(_W)
+        with _c0:
+            opt_act_sl_tp = st.toggle("🎯 Stop Loss / Take Profit", value=False, key="opt_act_sl_tp")
+        if opt_act_sl_tp:
+            opt_stop_loss   = _c1.number_input("", value=-300.0, step=10.0, key="opt_sl_val", label_visibility="collapsed")
+            opt_take_profit = _c2.number_input("", value=600.0, step=10.0, key="opt_tp_val", label_visibility="collapsed")
+            opt_dest_gestion = _c3.selectbox("", ["App (Watchdog)", "IBKR (Broker)"], key="opt_dest_gestion", label_visibility="collapsed")
+        st.markdown(_SP, unsafe_allow_html=True)
+
+        # Fila: Cerrar por VIX
+        _c0, _c1, _c2, _c3 = st.columns(_W)
+        with _c0:
+            opt_act_vix_sal = st.toggle("🚨 Cerrar por VIX", value=False, key="opt_act_vix_sal")
+        if opt_act_vix_sal:
+            opt_vix_max = _c1.number_input("", min_value=1.0, value=28.0, step=0.5, key="opt_vix_max", label_visibility="collapsed")
+        st.markdown(_SP, unsafe_allow_html=True)
+
+        # Fila: Cerrar por SMA
+        _c0, _c1, _c2, _c3 = st.columns(_W)
+        with _c0:
+            opt_act_sma_sal = st.toggle("📈 Cerrar por SMA", value=False, key="opt_act_sma_sal")
+        if opt_act_sma_sal:
+            opt_sma_per_sal = _c1.number_input("", min_value=5, value=200, step=5, key="opt_sma_per_sal", label_visibility="collapsed")
+            opt_sma_reg_sal = _c2.selectbox("", ["Precio < SMA", "Precio > SMA"], key="opt_sma_reg_sal", label_visibility="collapsed")
+        st.markdown(_SP, unsafe_allow_html=True)
+
+        # Fila: Hora Forzada
+        _c0, _c1, _c2, _c3 = st.columns(_W)
+        with _c0:
+            opt_act_hora_sal = st.toggle("⏰ Hora Forzada", value=False, key="opt_act_hora_sal")
+        if opt_act_hora_sal:
+            opt_hora_sal = _c1.text_input("", value="21:45", key="opt_hora_sal", label_visibility="collapsed")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        submit_opt = st.button("Encolar Estrategia Opciones", width="stretch", key="btn_encolar_opciones")
+
+        if submit_opt:
+            # Serializamos las patas
+            patas_serializadas = []
+            for p in st.session_state["patas_opciones"]:
+                p_copy = p.copy()
+                if isinstance(p_copy["vencimiento"], date):
+                    p_copy["vencimiento"] = p_copy["vencimiento"].strftime('%Y-%m-%d')
+                patas_serializadas.append(p_copy)
+
+            # Construimos condiciones de entrada
+            opt_cond_ent = {}
+            if opt_act_horario:
+                opt_cond_ent["horario"] = {"activo": True, "hora_inicio": o_h_ini, "hora_fin": o_h_fin}
+            if opt_act_vix:
+                opt_cond_ent["vix"] = {"activo": True, "valor": float(opt_vix_val), "operador": opt_vix_op}
+            if opt_act_sma:
+                opt_cond_ent["sma"] = {"activo": True, "periodo": int(opt_sma_per), "regla": opt_sma_reg}
+            if opt_act_precio:
+                opt_cond_ent["precio_disparador"] = {"activo": True, "valor": float(opt_precio_val), "operador": opt_precio_op}
+            opt_cond_ent["frecuencia"] = {"activo": (opt_frecuencia != "Única"), "tipo": opt_frecuencia}
+
+            # Construimos condiciones de salida
+            opt_cond_sal = {}
+            if opt_act_sl_tp:
+                opt_cond_sal["stop_loss"] = float(opt_stop_loss)
+                opt_cond_sal["take_profit"] = float(opt_take_profit)
+                opt_cond_sal["gestion"] = opt_dest_gestion
+            if opt_act_vix_sal:
+                opt_cond_sal["vix_maximo"] = float(opt_vix_max)
+            if opt_act_sma_sal:
+                opt_cond_sal["sma"] = {"activo": True, "periodo": int(opt_sma_per_sal), "regla": opt_sma_reg_sal}
+            if opt_act_hora_sal:
+                opt_cond_sal["cierre_horario"] = opt_hora_sal
+
+            tipo_act_est = "BAG" if len(patas_serializadas) > 1 else "OPTION"
+
+            try:
+                est_id = db.crear_estrategia(
+                    ticker=opt_ticker,
+                    tipo_activo=tipo_act_est,
+                    estado="PENDIENTE_ENTRADA",
+                    patas=patas_serializadas,
+                    condiciones_entrada=opt_cond_ent if opt_cond_ent else None,
+                    condiciones_salida=opt_cond_sal if opt_cond_sal else None,
+                    precio_entrada=opt_precio_entrada
+                )
+
+                st.success(f"🚀 Estrategia de opciones #{est_id} encolada correctamente en estado PENDIENTE_ENTRADA.")
+                db.registrar_evento("CREACION_ESTRATEGIA_UI", f"Estrategia #{est_id} de opciones ({opt_ticker}) encolada.")
+
+                enviar_alerta_webhook(
+                    titulo="📥 Nueva Estrategia Encolada (Opciones)",
+                    mensaje=f"**ID:** {est_id}\n**Ticker:** {opt_ticker}\n**Tipo:** {tipo_act_est}\n**Patas:** {len(patas_serializadas)} patas\n**Precio Objetivo:** {opt_precio_entrada if opt_precio_entrada else 'Mercado'}\n**Frecuencia:** {opt_frecuencia}",
+                    color="info"
+                )
+            except Exception as e:
+                st.error(f"Error al guardar estrategia: {e}")
+
+
+# ==========================================
+# TAB 4: MONITORIZACIÓN & CONTROL ROOM
+# ==========================================
+with tabs[3]:
+    st.header("Consola de Control Algorítmico (Control Room)")
+    
+    # 1. Muestra Estrategias Activas
+    st.subheader("📈 Estrategias Activas")
+    
+    @st.fragment(run_every=15)
+    def render_estrategias_activas():
+        estrategias_activas = db.obtener_estrategias(estado="ACTIVA")
+        
+        if not estrategias_activas:
+            st.info("No hay estrategias ACTIVAS ejecutándose actualmente en el mercado.")
+        else:
+            # Mostramos tarjetas premium para cada estrategia activa
+            for est in estrategias_activas:
+                ticker = est["ticker"]
+                tipo_activo = est["tipo_activo"]
+                condiciones_salida = est.get("condiciones_salida") or {}
+                
+                pnl = None
+                pnl_str = "Offline (N/A)"
+                pnl_color = "#94a3b8"  # Slate / gris
+                
+                # Intentamos obtener P&L si el broker está conectado
+                if conectado:
+                    try:
+                        pnl = st.session_state.broker.calcular_pnl_estrategia(
+                            ticker=ticker,
+                            tipo_activo=tipo_activo,
+                            patas=est["patas"]
+                        )
+                        if pnl is not None:
+                            pnl_color = "#10b981" if pnl >= 0 else "#ef4444"  # Verde o Rojo
+                            pnl_str = f"${pnl:+.2f}"
+                        else:
+                            pnl_str = "Sin datos de posición"
+                    except Exception as e_pnl:
+                        pnl_str = f"Error: {e_pnl}"
+                
+                # Info de SL y TP
+                sl_val = condiciones_salida.get("stop_loss")
+                tp_val = condiciones_salida.get("take_profit")
+                
+                sl_tp_info = ""
+                if sl_val is not None or tp_val is not None:
+                    sl_tp_info = "<div style='margin-top: 10px; font-size: 0.9rem; color: #94a3b8; display: flex; flex-wrap: wrap; gap: 20px;'>"
+                    if sl_val is not None:
+                        dist_sl = ""
+                        if pnl is not None:
+                            dist = pnl - float(sl_val)
+                            dist_sl = f" (Margen: ${dist:.2f})"
+                        sl_tp_info += f"<span>🔴 <b>Stop Loss:</b> ${sl_val}{dist_sl}</span>"
+                    if tp_val is not None:
+                        dist_tp = ""
+                        if pnl is not None:
+                            dist = float(tp_val) - pnl
+                            dist_tp = f" (Falta: ${dist:.2f})"
+                        sl_tp_info += f"<span>🟢 <b>Take Profit:</b> ${tp_val}{dist_tp}</span>"
+                    sl_tp_info += "</div>"
+
+                with st.container(key=f"strategy_card_{est['id']}"):
+                    col_info, col_status = st.columns([3.5, 1.5])
+                    
+                    with col_info:
+                        st.markdown(f"""
+                        <h4 style='margin: 0; color: #6366f1;'>#{est['id']} - {est['ticker']} ({est['tipo_activo']})</h4>
+                        <div style='margin-top: 10px; display: flex; gap: 40px; font-size: 0.95rem; color: #cbd5e1;'>
+                            <p style='margin: 0;'><b>Creada:</b> {est['fecha_creacion'][:19].replace('T', ' ')}</p>
+                            <p style='margin: 0;'><b>Precio Entrada:</b> ${est['precio_entrada'] if est['precio_entrada'] is not None else '—'}</p>
+                        </div>
+                        {sl_tp_info}
+                        """, unsafe_allow_html=True)
+                    
+                    with col_status:
+                        st.markdown(f"""
+                        <div style='display: flex; flex-direction: column; gap: 8px; align-items: flex-end;'>
+                            <span style='background-color: {pnl_color}22; color: {pnl_color}; border: 1px solid {pnl_color}44; padding: 4px 10px; border-radius: 8px; font-weight: bold; font-size: 0.9rem; display: inline-block; text-align: center; width: fit-content;'>P&L: {pnl_str}</span>
+                            <span style='background-color: #10b981; color: white; padding: 4px 10px; border-radius: 8px; font-weight: bold; font-size: 0.8rem; display: inline-block; text-align: center; width: fit-content;'>ACTIVA</span>
+                        </div>
+                        <div style='height: 12px;'></div>
+                        """, unsafe_allow_html=True)
+                        
+                        if st.button(f"🛑 Cierre Forzado Manual", key=f"cierre_man_{est['id']}", use_container_width=True):
+                            with st.spinner("Enviando orden de cierre forzado manual..."):
+                                try:
+                                    if conectado:
+                                        broker_res = st.session_state.broker.enviar_orden_cierre_generica(
+                                            ticker=est["ticker"],
+                                            tipo_activo=est["tipo_activo"],
+                                            patas=est["patas"]
+                                        )
+                                        order_id_cierre = broker_res["order_id"]
+                                    else:
+                                        order_id_cierre = random.randint(100000, 999999)
+                                        
+                                    db.actualizar_estado_estrategia(
+                                        estrategia_id=est["id"],
+                                        nuevo_estado="CERRADA_MANUAL",
+                                        order_id_salida=order_id_cierre,
+                                        precio_salida=0.0,
+                                        pnl_realizado=pnl if pnl is not None else 0.0,
+                                        fecha_cierre=datetime.now().isoformat()
+                                    )
+                                    db.registrar_evento("CIERRE_MANUAL_UI", f"Estrategia #{est['id']} ({est['ticker']}) cerrada por el operador desde UI.")
+                                    enviar_alerta_webhook(
+                                        titulo="🛑 Estrategia Cerrada Manualmente (UI)",
+                                        mensaje=f"**ID:** {est['id']}\n**Ticker:** {est['ticker']}\n**Motivo:** Acción del operador",
+                                        color="warning"
+                                    )
+                                    st.success("Posición cerrada con éxito.")
+                                    st.rerun()
+                                except Exception as ex:
+                                    st.error(f"Fallo al cerrar posición: {ex}")
+                                    
+                    with st.expander(f"Ver detalle de patas y reglas de la estrategia #{est['id']}"):
+                        st.json({"patas": est["patas"], "condiciones_entrada": est["condiciones_entrada"], "condiciones_salida": est["condiciones_salida"]})
+                    
+                                
+    render_estrategias_activas()
+    
+    st.divider()
+    
+    # 2. Formulario de Mutación en Caliente (Hot-Reloading SL/TP)
+    st.subheader("🎯 Modificación de Límites en Caliente")
+    st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Modifica instantáneamente los umbrales de Stop Loss y Take Profit de las estrategias activas. El Watchdog cargará los nuevos valores en su próximo ciclo de evaluación.</p>", unsafe_allow_html=True)
+    
+    todas_estrategias = db.obtener_estrategias()
+    est_activas_list = [e for e in todas_estrategias if e["estado"] == "ACTIVA"]
+    
+    if not est_activas_list:
+        st.info("No hay estrategias activas disponibles para modificar límites.")
+    else:
+        opciones_dropdown = {f"Estrategia #{e['id']} - {e['ticker']} ({e['tipo_activo']})": e["id"] for e in est_activas_list}
+        seleccionada_label = st.selectbox("Selecciona la Estrategia Activa", list(opciones_dropdown.keys()))
+        est_id_select = opciones_dropdown[seleccionada_label]
+        
+        # Recuperamos la estrategia seleccionada
+        estrategia_sel = next(e for e in est_activas_list if e["id"] == est_id_select)
+        condiciones_salida_sel = estrategia_sel.get("condiciones_salida") or {}
+        
+        current_sl = condiciones_salida_sel.get("stop_loss", -100.0)
+        current_tp = condiciones_salida_sel.get("take_profit", 200.0)
+        
+        col_m1, col_m2 = st.columns(2)
+        new_sl = col_m1.number_input("Nuevo Stop Loss ($ absoluto, ej. -150.0)", value=float(current_sl), step=10.0)
+        new_tp = col_m2.number_input("Nuevo Take Profit ($ absoluto, ej. 350.0)", value=float(current_tp), step=10.0)
+        
+        if st.button("💾 Actualizar Límites", type="primary"):
+            try:
+                res_mut = db.actualizar_limites_sl_tp(estrategia_id=est_id_select, stop_loss=new_sl, take_profit=new_tp)
+                if res_mut:
+                    st.success("¡Límites actualizados en la base de datos! El Watchdog cargará los nuevos límites en su siguiente ciclo.")
+                    db.registrar_evento("MUTACION_LIMITES_UI", f"Modificados límites en caliente para #{est_id_select}. SL: {new_sl}$, TP: {new_tp}$.")
+                    enviar_alerta_webhook(
+                        titulo="🔄 Límites de Riesgo Modificados",
+                        mensaje=f"**ID Estrategia:** {est_id_select}\n**Nuevo Stop Loss:** {new_sl}$\n**Nuevo Take Profit:** {new_tp}$",
+                        color="warning"
+                    )
+                    st.rerun()
+                else:
+                    st.error("No se pudo actualizar los límites de la estrategia.")
+            except Exception as e:
+                st.error(f"Error al mutar límites: {e}")
+                
+    st.divider()
+    
+    # 3. MOCKS DE SIMULACIÓN SANDBOX (HITO 4)
+    with st.expander("🧪 Ecosistema de Pruebas Offline (TFG Sandbox Simulator)"):
+        st.markdown("<p style='color:#94a3b8;'>Simula los eventos de mercado y los flujos de los Watchdogs de manera interactiva sin conexión al broker real.</p>", unsafe_allow_html=True)
+        
+        estrategias_todas_list = db.obtener_estrategias()
+        
+        if not estrategias_todas_list:
+            st.warning("No hay estrategias en base de datos. Crea una estrategia en los Tabs de Opciones/Acciones para simular.")
+        else:
+            opciones_mock_dict = {f"#{e['id']} - {e['ticker']} ({e['tipo_activo']}) [{e['estado']}]": e["id"] for e in estrategias_todas_list}
+            label_mock_select = st.selectbox("Selecciona Estrategia a Simular", list(opciones_mock_dict.keys()))
+            est_id_mock = opciones_mock_dict[label_mock_select]
+            est_mock_data = next(e for e in estrategias_todas_list if e["id"] == est_id_mock)
+            
+            c_mock1, c_mock2, c_mock3 = st.columns(3)
+            
+            # Simular Entrada
+            if est_mock_data["estado"] == "PENDIENTE_ENTRADA":
+                if c_mock1.button("🟢 Simular Activación (Entrada OK)", width="stretch"):
+                    db.actualizar_estado_estrategia(
+                        estrategia_id=est_id_mock,
+                        nuevo_estado="ACTIVA",
+                        order_id_entrada=random.randint(100000, 999999),
+                        precio_entrada=est_mock_data["precio_entrada"] or 150.0,
+                        fecha_ejecucion=datetime.now().isoformat()
+                    )
+                    db.registrar_evento("SANDBOX_MOCK_ENTRADA", f"Simulada entrada autorizada para Estrategia #{est_id_mock}.")
+                    enviar_alerta_webhook(
+                        titulo="🚀 Estrategia Lanzada (Sandbox Mock)",
+                        mensaje=f"**ID:** {est_id_mock}\n**Ticker:** {est_mock_data['ticker']}\n**Estado:** ACTIVA (Simulación)",
+                        color="success"
+                    )
+                    st.success("Simulación de entrada realizada. Recargando...")
+                    st.rerun()
+            else:
+                c_mock1.markdown("<small style='color:#64748b;'>Simular Entrada (Deshabilitado: ya activa o cerrada)</small>", unsafe_allow_html=True)
+                
+            # Simular Cierre TP
+            if est_mock_data["estado"] == "ACTIVA":
+                if c_mock2.button("🟢 Simular Cierre Take Profit", width="stretch"):
+                    tp_val_mock = est_mock_data.get("condiciones_salida", {}).get("take_profit", 100.0)
+                    db.actualizar_estado_estrategia(
+                        estrategia_id=est_id_mock,
+                        nuevo_estado="CERRADA_TAKE_PROFIT",
+                        order_id_salida=random.randint(100000, 999999),
+                        precio_salida=0.0,
+                        pnl_realizado=float(tp_val_mock),
+                        fecha_cierre=datetime.now().isoformat()
+                    )
+                    db.registrar_evento("SANDBOX_MOCK_SALIDA_TP", f"Simulado cierre por Take Profit para Estrategia #{est_id_mock}. PnL: {tp_val_mock}$.")
+                    enviar_alerta_webhook(
+                        titulo="🛑 Estrategia Cerrada (Sandbox TP)",
+                        mensaje=f"**ID:** {est_id_mock}\n**Ticker:** {est_mock_data['ticker']}\n**Motivo:** TAKE_PROFIT (Simulado)\n**P&L Realizado:** {tp_val_mock}$",
+                        color="success"
+                    )
+                    st.success("Simulación de cierre por TP realizada.")
+                    st.rerun()
+                    
+                # Simular Cierre SL
+                if c_mock3.button("🔴 Simular Cierre Stop Loss", width="stretch"):
+                    sl_val_mock = est_mock_data.get("condiciones_salida", {}).get("stop_loss", -100.0)
+                    db.actualizar_estado_estrategia(
+                        estrategia_id=est_id_mock,
+                        nuevo_estado="CERRADA_STOP_LOSS",
+                        order_id_salida=random.randint(100000, 999999),
+                        precio_salida=0.0,
+                        pnl_realizado=float(sl_val_mock),
+                        fecha_cierre=datetime.now().isoformat()
+                    )
+                    db.registrar_evento("SANDBOX_MOCK_SALIDA_SL", f"Simulado cierre por Stop Loss para Estrategia #{est_id_mock}. PnL: {sl_val_mock}$.")
+                    enviar_alerta_webhook(
+                        titulo="🛑 Estrategia Cerrada (Sandbox SL)",
+                        mensaje=f"**ID:** {est_id_mock}\n**Ticker:** {est_mock_data['ticker']}\n**Motivo:** STOP_LOSS (Simulado)\n**P&L Realizado:** {sl_val_mock}$",
+                        color="error"
+                    )
+                    st.success("Simulación de cierre por SL realizada.")
+                    st.rerun()
+            else:
+                c_mock2.markdown("<small style='color:#64748b;'>Simular TP (Deshabilitado: no activa)</small>", unsafe_allow_html=True)
+                c_mock3.markdown("<small style='color:#64748b;'>Simular SL (Deshabilitado: no activa)</small>", unsafe_allow_html=True)
+
+    st.divider()
+    
+    # 4. Historial Completo y Descarga CSV
+    st.subheader("📋 Historial de Estrategias y Registro de Auditoría")
+    
+    df_est_hist = db.obtener_estrategias_df()
+    df_audit_logs = db.obtener_logs(limit=100)
+    
+    col_csv1, col_csv2 = st.columns(2)
+    
+    if not df_est_hist.empty:
+        csv_est = df_est_hist.to_csv(index=False).encode('utf-8')
+        col_csv1.download_button(
+            label="📥 Descargar Historial de Estrategias (CSV)",
+            data=csv_est,
+            file_name="historial_estrategias_tfg.csv",
+            mime="text/csv",
+            width="stretch"
+        )
+    
+    if not df_audit_logs.empty:
+        csv_audit = df_audit_logs.to_csv(index=False).encode('utf-8')
+        col_csv2.download_button(
+            label="📥 Descargar Logs de Auditoría (CSV)",
+            data=csv_audit,
+            file_name="logs_auditoria_tfg.csv",
+            mime="text/csv",
+            width="stretch"
+        )
+        
+    # Tablas de datos
+    tab_est, tab_aud = st.tabs(["Listado de Estrategias", "Registro de Auditoría (Logs)"])
+    
+    with tab_est:
+        if df_est_hist.empty:
+            st.info("No hay registros en el historial de estrategias.")
+        else:
+            st.dataframe(df_est_hist, width="stretch", hide_index=True)
+            
+    with tab_aud:
+        if df_audit_logs.empty:
+            st.info("No hay eventos registrados en la auditoría.")
+        else:
+            st.dataframe(df_audit_logs, width="stretch", hide_index=True)

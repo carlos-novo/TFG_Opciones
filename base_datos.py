@@ -1,186 +1,96 @@
 import sqlite3
 import os
+import json
 from datetime import datetime
+import pandas as pd
 
 class GestorBaseDatos:
     """
     Clase para gestionar la persistencia local del sistema mediante SQLite.
-    Actúa como un log de auditoría para registrar eventos críticos del bot.
+    Soporta una arquitectura flexible para trading multileg y direccional
+    almacenando patas y condiciones en formato JSON.
     """
-    def __init__(self, db_name="tfg_trading.db"):
-        # REGLA ARCHITECTURE.md: Ruta absoluta anclada al directorio del script.
-        # Evita el desplazamiento de Working Directory de Streamlit.
+    def __init__(self, db_name="tfg_trading.db", reset_db=False):
+        # Ruta absoluta anclada al directorio de este script para evitar problemas con Streamlit
         _dir_actual = os.path.dirname(os.path.abspath(__file__))
         self.db_path = os.path.join(_dir_actual, db_name)
+        
+        if reset_db:
+            self.borrar_base_datos()
+            
         self._crear_tablas()
+
+    def borrar_base_datos(self):
+        """Elimina físicamente el archivo de base de datos para comenzar de cero."""
+        if os.path.exists(self.db_path):
+            try:
+                os.remove(self.db_path)
+            except Exception as e:
+                print(f"Error al eliminar la base de datos vieja: {e}")
 
     def _conectar(self):
         """Abre una conexión a la base de datos local usando ruta absoluta."""
         return sqlite3.connect(self.db_path)
 
     def _crear_tablas(self):
-        """Crea las tablas necesarias si no existen (Patrón Singleton de BD)."""
+        """Crea las tablas necesarias. Purga y migra de forma automática si detecta el esquema antiguo."""
         conexion = self._conectar()
         cursor = conexion.cursor()
         
-        # Tabla de Auditoría: Registra accesos y validaciones del motor
+        # Detectar si existe el esquema antiguo de operaciones (por ejemplo, buscando la columna 'put_long')
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='operaciones';")
+        existe_operaciones_antiguo = cursor.fetchone() is not None
+        
+        if existe_operaciones_antiguo:
+            # Borrar las tablas antiguas obsoletas
+            cursor.execute("DROP TABLE IF EXISTS operaciones;")
+            cursor.execute("DROP TABLE IF EXISTS cola_reintentos;")
+            cursor.execute("DROP TABLE IF EXISTS auditoria;")
+            conexion.commit()
+            
+        # Tabla de Auditoría: Registra logs históricos del bot, watchdog y eventos
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS auditoria (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                fecha TIMESTAMP,
-                evento TEXT,
+                fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                evento TEXT NOT NULL,
                 detalles TEXT
             )
         ''')
 
-        # Tabla de Operaciones: Historial financiero de órdenes ejecutadas
+        # Tabla de Estrategias: Estructura flexible unificada para multileg y acciones
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS operaciones (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                fecha       TIMESTAMP,
-                order_id    INTEGER,
-                ticker      TEXT,
-                vencimiento TEXT,
-                put_long    REAL,
-                put_short   REAL,
-                call_short  REAL,
-                call_long   REAL,
-                credito     REAL,
-                max_beneficio REAL,
-                max_riesgo  REAL,
-                status      TEXT
+            CREATE TABLE IF NOT EXISTS estrategias (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL,
+                tipo_activo TEXT NOT NULL,
+                estado TEXT NOT NULL,
+                fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                fecha_ejecucion TIMESTAMP,
+                fecha_cierre TIMESTAMP,
+                patas_json TEXT NOT NULL,
+                condiciones_entrada_json TEXT,
+                condiciones_salida_json TEXT,
+                order_id_entrada INTEGER,
+                order_id_salida INTEGER,
+                precio_entrada REAL,
+                precio_salida REAL,
+                pnl_realizado REAL
             )
         ''')
         
-        # Tabla de Cola de Reintentos: Almacena órdenes fallidas por desconexión TCP
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS cola_reintentos (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                fecha       TIMESTAMP,
-                ticker      TEXT,
-                vencimiento TEXT,
-                put_long    REAL,
-                put_short   REAL,
-                call_short  REAL,
-                call_long   REAL,
-                credito     REAL,
-                intentos    INTEGER,
-                status      TEXT
-            )
-        ''')
-
         conexion.commit()
         conexion.close()
-
-    def registrar_operacion(self, order_id, ticker, vencimiento, strikes, credito, metricas, status):
-        """
-        Inserta un registro en la tabla de operaciones con el perfil financiero
-        completo de la orden BAG ejecutada.
-
-        Difiere del log de auditoría en que almacena datos cuantitativos
-        (strikes, crédito, riesgo) pensados para análisis post-operativo.
-        """
-        conexion = self._conectar()
-        cursor = conexion.cursor()
-        p_long, p_short, c_short, c_long = strikes
-        try:
-            cursor.execute(
-                '''
-                INSERT INTO operaciones
-                    (fecha, order_id, ticker, vencimiento,
-                     put_long, put_short, call_short, call_long,
-                     credito, max_beneficio, max_riesgo, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''',
-                (
-                    datetime.now(), order_id, ticker, str(vencimiento),
-                    p_long, p_short, c_short, c_long,
-                    credito, metricas['max_beneficio'], metricas['max_riesgo'], status
-                )
-            )
-            conexion.commit()
-        except Exception as e:
-            print(f"Error al registrar operación en BD: {e}")
-        finally:
-            conexion.close()
-
-    def encolar_reintento(self, ticker, vencimiento, strikes, credito):
-        """Añade una orden a la cola de reintentos cuando el Gateway se cae."""
-        conexion = self._conectar()
-        cursor = conexion.cursor()
-        ahora = datetime.now()
-        
-        cursor.execute('''
-            INSERT INTO cola_reintentos (fecha, ticker, vencimiento, put_long, put_short, call_short, call_long, credito, intentos, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'QUEUED')
-        ''', (ahora, ticker, vencimiento.strftime('%Y%m%d'), strikes[0], strikes[1], strikes[2], strikes[3], credito))
-        
-        conexion.commit()
-        conexion.close()
-        
-    def obtener_reintentos_pendientes(self):
-        """Recupera las órdenes en cola listas para reintento."""
-        import pandas as pd
-        conexion = self._conectar()
-        try:
-            df = pd.read_sql_query("SELECT * FROM cola_reintentos WHERE status = 'QUEUED'", conexion)
-            return df
-        except Exception:
-            return None
-        finally:
-            conexion.close()
-
-    def incrementar_intentos(self, id_reintento):
-        """Suma 1 al contador de intentos. Devuelve el número actual."""
-        conexion = self._conectar()
-        cursor = conexion.cursor()
-        cursor.execute("UPDATE cola_reintentos SET intentos = intentos + 1 WHERE id = ?", (id_reintento,))
-        conexion.commit()
-        cursor.execute("SELECT intentos FROM cola_reintentos WHERE id = ?", (id_reintento,))
-        intentos = cursor.fetchone()[0]
-        conexion.close()
-        return intentos
-
-    def marcar_reintento_procesado(self, id_reintento, status_final):
-        """Actualiza el estado de un reintento a procesado (o fallido definitivo)."""
-        conexion = self._conectar()
-        cursor = conexion.cursor()
-        cursor.execute("UPDATE cola_reintentos SET status = ? WHERE id = ?", (status_final, id_reintento))
-        conexion.commit()
-        conexion.close()
-
-    def obtener_operaciones(self):
-        """
-        Recupera el historial completo de órdenes ejecutadas.
-        Retorna un DataFrame de Pandas ordenado por fecha descendente.
-        """
-        import pandas as pd
-        conexion = self._conectar()
-        try:
-            query = '''
-                SELECT fecha, order_id, ticker, vencimiento,
-                       put_long, put_short, call_short, call_long,
-                       credito, max_beneficio, max_riesgo, status
-                FROM operaciones
-                ORDER BY fecha DESC
-            '''
-            df = pd.read_sql_query(query, conexion)
-            return df
-        except Exception as e:
-            print(f"Error al obtener operaciones: {e}")
-            return None
-        finally:
-            conexion.close()
 
     def registrar_evento(self, evento, detalles=""):
         """Inserta un nuevo registro en el log de auditoría."""
         conexion = self._conectar()
         cursor = conexion.cursor()
-        
+        ahora = datetime.now().isoformat()
         try:
             cursor.execute(
                 "INSERT INTO auditoria (fecha, evento, detalles) VALUES (?, ?, ?)",
-                (datetime.now(), evento, detalles)
+                (ahora, evento, detalles)
             )
             conexion.commit()
         except Exception as e:
@@ -188,35 +98,304 @@ class GestorBaseDatos:
         finally:
             conexion.close()
 
+    def obtener_logs(self, limit=50):
+        """
+        Recupera todos los registros de auditoría ordenados por fecha descendente.
+        Retorna un DataFrame de Pandas para visualización.
+        """
+        conexion = self._conectar()
+        try:
+            query = "SELECT fecha, evento, detalles FROM auditoria ORDER BY fecha DESC LIMIT ?"
+            df = pd.read_sql_query(query, conexion, params=(limit,))
+            return df
+        except Exception as e:
+            print(f"Error al obtener logs: {e}")
+            return pd.DataFrame()
+        finally:
+            conexion.close()
+
+    # ==========================================
+    # MÉTODOS CRUD PARA ESTRATEGIAS
+    # ==========================================
+
+    def crear_estrategia(self, ticker, tipo_activo, estado, patas, condiciones_entrada=None, condiciones_salida=None, precio_entrada=None):
+        """
+        Inserta una nueva estrategia en la base de datos.
+        Convierte automáticamente las patas y condiciones (listas/dicts) a strings JSON.
+        """
+        conexion = self._conectar()
+        cursor = conexion.cursor()
+        ahora = datetime.now().isoformat()
+        
+        patas_str = json.dumps(patas)
+        cond_entrada_str = json.dumps(condiciones_entrada) if condiciones_entrada is not None else None
+        cond_salida_str = json.dumps(condiciones_salida) if condiciones_salida is not None else None
+        
+        try:
+            cursor.execute('''
+                INSERT INTO estrategias (
+                    ticker, tipo_activo, estado, fecha_creacion,
+                    patas_json, condiciones_entrada_json, condiciones_salida_json, precio_entrada
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (ticker, tipo_activo, estado, ahora, patas_str, cond_entrada_str, cond_salida_str, precio_entrada))
+            conexion.commit()
+            estrategia_id = cursor.lastrowid
+            self.registrar_evento("CREAR_ESTRATEGIA", f"Creada estrategia ID {estrategia_id} para {ticker} ({tipo_activo})")
+            return estrategia_id
+        except Exception as e:
+            self.registrar_evento("ERROR_CREAR_ESTRATEGIA", f"Error al insertar estrategia: {e}")
+            raise e
+        finally:
+            conexion.close()
+
+    def obtener_estrategia(self, estrategia_id):
+        """
+        Recupera una estrategia específica por su ID.
+        Deserializa los campos JSON a colecciones nativas de Python.
+        """
+        conexion = self._conectar()
+        cursor = conexion.cursor()
+        try:
+            cursor.execute('''
+                SELECT id, ticker, tipo_activo, estado, fecha_creacion, fecha_ejecucion, fecha_cierre,
+                       patas_json, condiciones_entrada_json, condiciones_salida_json,
+                       order_id_entrada, order_id_salida, precio_entrada, precio_salida, pnl_realizado
+                FROM estrategias
+                WHERE id = ?
+            ''', (estrategia_id,))
+            fila = cursor.fetchone()
+            if not fila:
+                return None
+            
+            return {
+                "id": fila[0],
+                "ticker": fila[1],
+                "tipo_activo": fila[2],
+                "estado": fila[3],
+                "fecha_creacion": fila[4],
+                "fecha_ejecucion": fila[5],
+                "fecha_cierre": fila[6],
+                "patas": json.loads(fila[7]) if fila[7] else [],
+                "condiciones_entrada": json.loads(fila[8]) if fila[8] else {},
+                "condiciones_salida": json.loads(fila[9]) if fila[9] else {},
+                "order_id_entrada": fila[10],
+                "order_id_salida": fila[11],
+                "precio_entrada": fila[12],
+                "precio_salida": fila[13],
+                "pnl_realizado": fila[14]
+            }
+        except Exception as e:
+            print(f"Error al obtener estrategia {estrategia_id}: {e}")
+            return None
+        finally:
+            conexion.close()
+
+    def obtener_estrategias(self, estado=None):
+        """
+        Obtiene una lista de todas las estrategias, opcionalmente filtradas por estado.
+        Cada estrategia es un diccionario con los campos JSON ya deserializados.
+        """
+        conexion = self._conectar()
+        cursor = conexion.cursor()
+        try:
+            if estado:
+                cursor.execute('''
+                    SELECT id, ticker, tipo_activo, estado, fecha_creacion, fecha_ejecucion, fecha_cierre,
+                           patas_json, condiciones_entrada_json, condiciones_salida_json,
+                           order_id_entrada, order_id_salida, precio_entrada, precio_salida, pnl_realizado
+                    FROM estrategias
+                    WHERE estado = ?
+                    ORDER BY fecha_creacion DESC
+                ''', (estado,))
+            else:
+                cursor.execute('''
+                    SELECT id, ticker, tipo_activo, estado, fecha_creacion, fecha_ejecucion, fecha_cierre,
+                           patas_json, condiciones_entrada_json, condiciones_salida_json,
+                           order_id_entrada, order_id_salida, precio_entrada, precio_salida, pnl_realizado
+                    FROM estrategias
+                    ORDER BY fecha_creacion DESC
+                ''')
+            
+            filas = cursor.fetchall()
+            estrategias = []
+            for fila in filas:
+                estrategias.append({
+                    "id": fila[0],
+                    "ticker": fila[1],
+                    "tipo_activo": fila[2],
+                    "estado": fila[3],
+                    "fecha_creacion": fila[4],
+                    "fecha_ejecucion": fila[5],
+                    "fecha_cierre": fila[6],
+                    "patas": json.loads(fila[7]) if fila[7] else [],
+                    "condiciones_entrada": json.loads(fila[8]) if fila[8] else {},
+                    "condiciones_salida": json.loads(fila[9]) if fila[9] else {},
+                    "order_id_entrada": fila[10],
+                    "order_id_salida": fila[11],
+                    "precio_entrada": fila[12],
+                    "precio_salida": fila[13],
+                    "pnl_realizado": fila[14]
+                })
+            return estrategias
+        except Exception as e:
+            print(f"Error al obtener estrategias: {e}")
+            return []
+        finally:
+            conexion.close()
+
+    def obtener_estrategias_df(self, estado=None):
+        """
+        Devuelve las estrategias en formato de DataFrame de Pandas.
+        Útil para la integración rápida con componentes Streamlit y la API REST.
+        """
+        estrategias = self.obtener_estrategias(estado)
+        return pd.DataFrame(estrategias)
+
+    def actualizar_estado_estrategia(self, estrategia_id, nuevo_estado, order_id_entrada=None, order_id_salida=None, precio_entrada=None, precio_salida=None, pnl_realizado=None, fecha_ejecucion=None, fecha_cierre=None):
+        """
+        Actualiza dinámicamente el estado y las variables de control financiero de una estrategia.
+        """
+        conexion = self._conectar()
+        cursor = conexion.cursor()
+        
+        updates = ["estado = ?"]
+        params = [nuevo_estado]
+        
+        if order_id_entrada is not None:
+            updates.append("order_id_entrada = ?")
+            params.append(order_id_entrada)
+        if order_id_salida is not None:
+            updates.append("order_id_salida = ?")
+            params.append(order_id_salida)
+        if precio_entrada is not None:
+            updates.append("precio_entrada = ?")
+            params.append(precio_entrada)
+        if precio_salida is not None:
+            updates.append("precio_salida = ?")
+            params.append(precio_salida)
+        if pnl_realizado is not None:
+            updates.append("pnl_realizado = ?")
+            params.append(pnl_realizado)
+        if fecha_ejecucion is not None:
+            updates.append("fecha_ejecucion = ?")
+            params.append(fecha_ejecucion)
+        if fecha_cierre is not None:
+            updates.append("fecha_cierre = ?")
+            params.append(fecha_cierre)
+            
+        params.append(estrategia_id)
+        query = f"UPDATE estrategias SET {', '.join(updates)} WHERE id = ?"
+        
+        try:
+            cursor.execute(query, tuple(params))
+            conexion.commit()
+            self.registrar_evento("ACTUALIZAR_ESTADO_ESTRATEGIA", f"Estrategia ID {estrategia_id} actualizada a {nuevo_estado}")
+            return True
+        except Exception as e:
+            self.registrar_evento("ERROR_ACTUALIZAR_ESTRATEGIA", f"Error al actualizar estado de ID {estrategia_id}: {e}")
+            return False
+        finally:
+            conexion.close()
+
+    def actualizar_condiciones_salida(self, estrategia_id, condiciones_salida):
+        """
+        Actualiza el campo condiciones_salida_json completo.
+        Recibe un diccionario Python y lo escribe como JSON string.
+        """
+        conexion = self._conectar()
+        cursor = conexion.cursor()
+        cond_salida_str = json.dumps(condiciones_salida)
+        try:
+            cursor.execute('''
+                UPDATE estrategias
+                SET condiciones_salida_json = ?
+                WHERE id = ?
+            ''', (cond_salida_str, estrategia_id))
+            conexion.commit()
+            self.registrar_evento("ACTUALIZAR_CONDICIONES_SALIDA", f"Condiciones de salida actualizadas para ID {estrategia_id}")
+            return True
+        except Exception as e:
+            self.registrar_evento("ERROR_ACTUALIZAR_CONDICIONES_SALIDA", f"Error en ID {estrategia_id}: {e}")
+            return False
+        finally:
+            conexion.close()
+
+    def actualizar_condiciones_entrada(self, estrategia_id, condiciones_entrada):
+        """
+        Actualiza el campo condiciones_entrada_json completo.
+        Recibe un diccionario Python y lo escribe como JSON string.
+        """
+        conexion = self._conectar()
+        cursor = conexion.cursor()
+        cond_entrada_str = json.dumps(condiciones_entrada)
+        try:
+            cursor.execute('''
+                UPDATE estrategias
+                SET condiciones_entrada_json = ?
+                WHERE id = ?
+            ''', (cond_entrada_str, estrategia_id))
+            conexion.commit()
+            self.registrar_evento("ACTUALIZAR_CONDICIONES_ENTRADA", f"Condiciones de entrada actualizadas para ID {estrategia_id}")
+            return True
+        except Exception as e:
+            self.registrar_evento("ERROR_ACTUALIZAR_CONDICIONES_ENTRADA", f"Error en ID {estrategia_id}: {e}")
+            return False
+        finally:
+            conexion.close()
+
+    def actualizar_limites_sl_tp(self, estrategia_id, stop_loss=None, take_profit=None):
+        """
+        Carga las condiciones de salida previas de la estrategia,
+        modifica 'stop_loss' y/o 'take_profit' manteniendo el resto de condiciones intactas,
+        y las vuelve a guardar. Esencial para el Watchdog de Salidas.
+        """
+        estrategia = self.obtener_estrategia(estrategia_id)
+        if not estrategia:
+            self.registrar_evento("ERROR_LIMITES_SL_TP", f"Estrategia ID {estrategia_id} no encontrada.")
+            return False
+        
+        condiciones = estrategia.get("condiciones_salida") or {}
+        if stop_loss is not None:
+            condiciones["stop_loss"] = stop_loss
+        if take_profit is not None:
+            condiciones["take_profit"] = take_profit
+            
+        return self.actualizar_condiciones_salida(estrategia_id, condiciones)
+
+    # ==========================================
+    # MÉTODOS DE COMPATIBILIDAD RETROACTIVA
+    # ==========================================
+
+    def obtener_operaciones(self):
+        """
+        Mapea las consultas del historial de operaciones de la UI y la API antigua
+        a la nueva tabla de estrategias para evitar errores durante el pivot.
+        """
+        return self.obtener_estrategias_df()
+
+    def obtener_reintentos_pendientes(self):
+        """
+        Retorna las estrategias que están pendientes de ejecución (estado 'PENDIENTE_ENTRADA').
+        Permite al watchdog modular su polling utilizando este método unificado.
+        """
+        return self.obtener_estrategias_df(estado='PENDIENTE_ENTRADA')
+
     def actualizar_estado_orden(self, order_id, nuevo_estado):
-        """Actualiza el estado de una operación en la base de datos."""
+        """
+        Actualiza el estado de la estrategia que corresponda a un order_id de entrada o salida.
+        """
         conexion = self._conectar()
         cursor = conexion.cursor()
         try:
             cursor.execute(
-                "UPDATE operaciones SET status = ? WHERE order_id = ?",
-                (nuevo_estado, order_id)
+                "UPDATE estrategias SET estado = ? WHERE order_id_entrada = ? OR order_id_salida = ?",
+                (nuevo_estado, order_id, order_id)
             )
             conexion.commit()
+            self.registrar_evento("ACTUALIZAR_ESTADO_ORDEN", f"Orden ID {order_id} actualizada a {nuevo_estado}")
+            return True
         except Exception as e:
-            print(f"Error al actualizar estado en BD: {e}")
-        finally:
-            conexion.close()
-
-    def obtener_logs(self):
-        """
-        Recupera todos los registros de auditoría ordenados por fecha descendente.
-        Retorna un DataFrame de Pandas para facilitar la visualización.
-        """
-        import pandas as pd # Import local para eficiencia
-        conexion = self._conectar()
-        try:
-            # Query para obtener los datos ordenados del más reciente al más antiguo
-            query = "SELECT fecha, evento, detalles FROM auditoria ORDER BY fecha DESC"
-            df = pd.read_sql_query(query, conexion)
-            return df
-        except Exception as e:
-            print(f"Error al obtener logs: {e}")
-            return None
+            self.registrar_evento("ERROR_ACTUALIZAR_ESTADO_ORDEN", f"Error actualizando orden {order_id}: {e}")
+            return False
         finally:
             conexion.close()

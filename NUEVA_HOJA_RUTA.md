@@ -1,9 +1,36 @@
 # 🎯 NUEVA HOJA DE RUTA — TFG Opciones Financieras
-**Documento único y definitivo. Reemplaza TODO.md y HOJA_RUTA.md.**
-**Fecha de creación:** 15/05/2026 | **Feature Freeze:** 23/05/2026 | **Entrega:** ~11/06/2026
+**Documento actualizado tras tutoría crítica: PIVOT ARQUITECTÓNICO.**
 
 ---
 
+## 🚨 PIVOT ARQUITECTÓNICO: Plataforma Agnóstica Multileg y Direccional
+
+Este bloque documenta el cambio de rumbo drástico exigido en la tutoría para abandonar la estrategia fija de Iron Condor e implementar un sistema de trading algorítmico avanzado.
+
+### Hito 1: Reestructuración del Núcleo de Datos (Persistencia Flexibilizada)
+*   **Destrucción de BD Obsoleta:** Borrado del archivo SQLite y purga de la tabla `operaciones` acoplada a 4 patas.
+*   **Adopción de JSON en SQLite:** Nueva tabla `estrategias`. Serialización de patas de opciones genéricas y de condiciones matemáticas complejas (Precio, VIX, SMA, Horarios, DCA) en columnas de texto JSON.
+
+### Hito 2: Refactorización de la Capa de Mercado (IBKR Connection)
+*   **Integración del Activo "Stock" (Acciones):** Métodos asíncronos para órdenes de `Stock` genéricas.
+*   **Contratos BAG Dinámicos:** Constructor algorítmico que itere sobre el JSON de base de datos para generar N `ComboLegs` y compactarlos en un único contrato BAG en IBKR.
+
+### Hito 3: Autómatas de Mercado (Watchdogs Duales)
+*   **Nacimiento del Watchdog de Entradas:** Hilo asíncrono que corre 24/7 leyendo órdenes en estado `PENDIENTE_ENTRADA`. Aplica reglas matemáticas (VIX, SMA) y filtros horarios (DCA) antes de disparar la orden al mercado.
+*   **Evolución del Watchdog de Salidas:** Consultas activas a base de datos cada 15 segundos para atrapar modificaciones en vivo de Stop Loss / Take Profit efectuadas por el usuario.
+
+### Hito 4: Rediseño de la Interfaz (Streamlit Frontend)
+*   **Tab Dashboard:** Consola inicial con Net Liquidation, Daily P&L y posiciones abiertas estilo IBKR Web.
+*   **Tab Acciones:** Formulario de compra direccional con acordeones de condiciones avanzadas.
+*   **Tab Opciones (Constructor Multileg):** Gestión del estado de sesión para añadir/eliminar filas dinámicamente. Gráfico Interactivo de Black-Scholes sumando el Payoff de N-patas con un *slider* de volatilidad teórica.
+*   **Tab Monitorización (Control Room):** Sub-formulario de mutación que inyecta nuevos parámetros de riesgo en caliente a la BD.
+*   **Eliminación de Backtest:** Pestaña purgada definitivamente.
+
+---
+
+## HOJA DE RUTA ANTERIOR (Histórico de Fases 1 a 3)
+
+---
 ## PARTE 1 — EVALUACIÓN CRÍTICA (modo tribunal)
 
 ### ✅ Hitos con Alto Valor Académico (destacar en la memoria)

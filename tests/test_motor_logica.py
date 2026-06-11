@@ -58,3 +58,72 @@ def test_sma_bloquea_si_datos_insuficientes():
             
     with pytest.raises(ValueError):
         MotorEstrategias.evaluar_condicion_sma(GestorSinDatos(), 'SPX', 20, 'Precio > SMA', 5200.0)
+
+
+def test_precio_disparador_menor_o_igual():
+    """Verifica que el precio disparador <= autoriza/bloquea correctamente."""
+    condiciones = {
+        "precio_disparador": {
+            "activo": True,
+            "valor": 150.0,
+            "operador": "<="
+        }
+    }
+    # Caso 1: precio_actual <= limite -> Debe autorizar
+    res_ok = MotorEstrategias.evaluar_condiciones_entrada(
+        gestor_ibkr=GestorMock(), ticker='AAPL', condiciones_entrada=condiciones, precio_actual=149.50
+    )
+    assert res_ok["autorizado"] is True
+    assert res_ok["detalles"]["precio_disparador"]["cumple"] is True
+    
+    # Caso 2: precio_actual > limite -> Debe bloquear
+    res_ko = MotorEstrategias.evaluar_condiciones_entrada(
+        gestor_ibkr=GestorMock(), ticker='AAPL', condiciones_entrada=condiciones, precio_actual=150.50
+    )
+    assert res_ko["autorizado"] is False
+    assert res_ko["detalles"]["precio_disparador"]["cumple"] is False
+
+
+def test_precio_disparador_mayor_o_igual():
+    """Verifica que el precio disparador >= autoriza/bloquea correctamente."""
+    condiciones = {
+        "precio_disparador": {
+            "activo": True,
+            "valor": 150.0,
+            "operador": ">="
+        }
+    }
+    # Caso 1: precio_actual >= limite -> Debe autorizar
+    res_ok = MotorEstrategias.evaluar_condiciones_entrada(
+        gestor_ibkr=GestorMock(), ticker='AAPL', condiciones_entrada=condiciones, precio_actual=150.50
+    )
+    assert res_ok["autorizado"] is True
+    assert res_ok["detalles"]["precio_disparador"]["cumple"] is True
+    
+    # Caso 2: precio_actual < limite -> Debe bloquear
+    res_ko = MotorEstrategias.evaluar_condiciones_entrada(
+        gestor_ibkr=GestorMock(), ticker='AAPL', condiciones_entrada=condiciones, precio_actual=149.50
+    )
+    assert res_ko["autorizado"] is False
+    assert res_ko["detalles"]["precio_disparador"]["cumple"] is False
+
+
+def test_sma_salida_activada():
+    """Verifica que si la condición SMA de salida se cumple, se dispara la acción de salida STOP_LOSS."""
+    from motor_logica import MotorSalida
+    condiciones = {
+        "sma": {
+            "activo": True,
+            "periodo": 5,
+            "regla": "Precio < SMA"
+        }
+    }
+    r = MotorSalida.evaluar_condiciones_salida(
+        gestor_ibkr=GestorMock(),
+        ticker='SPX',
+        condiciones_salida=condiciones,
+        pnl_actual=0.0,
+        precio_actual=5200.0
+    )
+    assert r["accion"] == "STOP_LOSS"
+    assert "SMA de salida activada" in r["motivo"]
