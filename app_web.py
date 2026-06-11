@@ -375,13 +375,13 @@ st.markdown("""
         -webkit-backdrop-filter: blur(10px) !important;
     }
 
-    /* Login Container Card Styling */
-    div[class*="st-key-login_container"] .stForm {
+    /* Login Form Card Styling */
+    .stForm {
         border: 1px solid rgba(99, 102, 241, 0.25) !important;
         box-shadow: 0 10px 40px rgba(99, 102, 241, 0.1) !important;
         background: rgba(13, 14, 21, 0.8) !important;
     }
-    div[class*="st-key-login_container"] div.stFormSubmitButton > button {
+    div.stFormSubmitButton > button {
         width: 100% !important;
     }
 </style>
@@ -404,7 +404,7 @@ if not st.session_state['autenticado']:
         col1, col2, col3 = st.columns([1, 1.2, 1])
         with col2:
             st.markdown("<br><br><br>", unsafe_allow_html=True)
-            st.markdown("<h2 style='text-align: center; background: linear-gradient(135deg, #818cf8 0%, #3b82f6 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-weight: 700; margin-bottom: 10px;'>Consola Algorítmica TFG</h2>", unsafe_allow_html=True)
+            st.markdown("<h2 style='text-align: center; color: #6366f1; font-weight: 700; margin-bottom: 10px;'>Consola Algorítmica TFG</h2>", unsafe_allow_html=True)
             st.markdown("<p style='text-align: center; color: #94a3b8;'>Introduce tus credenciales para acceder a la plataforma multileg.</p>", unsafe_allow_html=True)
             
             with st.form("login_form"):
