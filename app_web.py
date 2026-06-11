@@ -45,6 +45,14 @@ st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap');
     
+    /* Hide the sidebar and collapsed arrow toggle completely */
+    section[data-testid="stSidebar"] {
+        display: none !important;
+    }
+    button[data-testid="collapsedControl"] {
+        display: none !important;
+    }
+    
     /* Global Styles */
     html, body, [data-testid="stAppViewContainer"] {
         font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -392,53 +400,62 @@ if 'broker' not in st.session_state:
 if 'posiciones_cartera' not in st.session_state:
     st.session_state['posiciones_cartera'] = None
 
-# --- BARRA LATERAL (SIDEBAR) ---
-st.sidebar.title("🛠️ Configuración de Red")
+# --- DIÁLOGO DE CONSULTA DE COTIZACIONES (POPUP MODAL) ---
+@st.dialog("🔍 Consultar Cotización")
+def mostrar_dialogo_cotizacion():
+    st.markdown("<p style='color:#94a3b8; font-size:0.95rem; margin-top:-10px;'>Consulta la cotización en tiempo real o retardada de cualquier ticker en Interactive Brokers.</p>", unsafe_allow_html=True)
+    ticker_test = st.text_input("Ticker (ej. AAPL, SPY, SPX)", value="SPY", max_chars=5, key="dialog_ticker").upper()
+    
+    if st.button("Consultar", use_container_width=True, type="primary"):
+        conectado = st.session_state.broker.esta_conectado()
+        if conectado:
+            with st.spinner("Consultando en IBKR..."):
+                precio = st.session_state.broker.obtener_precio_prueba(ticker_test)
+                if precio:
+                    st.success(f"📈 Última cotización de **{ticker_test}**: **${precio:.2f}**")
+                else:
+                    st.error("❌ Fallo en la consulta. Verifica que el ticker sea válido y el mercado esté abierto.")
+        else:
+            # Fallback en modo offline para demostración/defensa
+            if ticker_test == "SPX":
+                mock_p = 7267.65
+            elif ticker_test == "SPY":
+                mock_p = 520.45
+            else:
+                mock_p = 150.00
+            st.info(f"💡 [Modo Offline] Precio simulado de **{ticker_test}**: **${mock_p:.2f}**")
 
-# Botón de Cerrar Sesión
-if st.sidebar.button("🚪 Cerrar Sesión", width="stretch"):
-    st.session_state['autenticado'] = False
-    if st.session_state.broker.esta_conectado():
-        st.session_state.broker.desconectar()
-    st.rerun()
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("Conexión al Broker")
-
-if st.sidebar.button("Alternar Conexión (Gateway)", width="stretch"):
-    if st.session_state.broker.esta_conectado():
-        st.session_state.broker.desconectar()
-    else:
-        st.session_state.broker.conectar()
-    st.rerun()
-
+# --- BARRA DE HERRAMIENTAS SUPERIOR (TOP TOOLBAR) ---
 conectado = st.session_state.broker.esta_conectado()
 color_est = "🟢" if conectado else "🔴"
-texto_est = "Conectado (Puerto 4002)" if conectado else "Desconectado"
-st.sidebar.metric(label="Estado IBKR", value=f"{color_est} {texto_est}")
+texto_est = "Conectado" if conectado else "Desconectado"
 
-# Prueba de cotizaciones
-ticker_test = st.sidebar.text_input("Probar Ticker", value="SPY", max_chars=5).upper()
-if st.sidebar.button("Consultar Cotización", width="stretch"):
-    if conectado:
-        with st.sidebar.status("Consultando precio...", expanded=False) as status:
-            precio = st.session_state.broker.obtener_precio_prueba(ticker_test)
-            if precio:
-                status.update(label=f"¡Éxito! {ticker_test}: ${precio}", state="complete")
-                st.sidebar.success(f"Último precio de {ticker_test}: **${precio}**")
-            else:
-                status.update(label="Fallo en la consulta", state="error")
-                st.sidebar.error("Verifica que el ticker sea válido y el mercado esté abierto.")
-    else:
-        st.sidebar.warning("⚠️ Debes estar conectado para consultar precios reales. (Modo Offline habilitado para validación).")
+col_logo, col_cot, col_conn, col_logout = st.columns([5, 2, 2.5, 1.5], vertical_alignment="center")
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("<small style='color: #64748b;'>TFG Carlos Novo - Plataforma de Trading Algorítmico 2026</small>", unsafe_allow_html=True)
+with col_logo:
+    st.markdown("<h2 style='margin:0; font-size:1.8rem; line-height:1.2;'>🏛️ Plataforma Algorítmica Multileg</h2>", unsafe_allow_html=True)
+    st.markdown("<p style='color: #94a3b8; font-size: 0.9rem; margin:0;'>Watchdogs en segundo plano, sensibilidades Black-Scholes y gestión de riesgo</p>", unsafe_allow_html=True)
 
+with col_cot:
+    if st.button("🔍 Probar Ticker", use_container_width=True, key="btn_top_cot"):
+        mostrar_dialogo_cotizacion()
 
-# --- CONFIGURACIÓN DE PESTAÑAS (4 TABS) ---
-st.title("🏛️ Plataforma Algorítmica de Trading Multileg")
-st.markdown("<p style='color: #94a3b8; font-size: 1.1rem; margin-top:-15px;'>Filtros avanzados, sensibilidades Black-Scholes y Watchdogs desacoplados</p>", unsafe_allow_html=True)
+with col_conn:
+    if st.button(f"{color_est} Gateway: {texto_est}", use_container_width=True, key="btn_top_conn"):
+        if conectado:
+            st.session_state.broker.desconectar()
+        else:
+            st.session_state.broker.conectar()
+        st.rerun()
+
+with col_logout:
+    if st.button("🚪 Salir", use_container_width=True, key="btn_top_logout"):
+        st.session_state['autenticado'] = False
+        if st.session_state.broker.esta_conectado():
+            st.session_state.broker.desconectar()
+        st.rerun()
+
+st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
 
 tabs = st.tabs(["📊 Dashboard", "⚙️ Acciones", "📐 Opciones", "📈 Control Room"])
 
