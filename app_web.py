@@ -387,7 +387,7 @@ if 'autenticado' not in st.session_state:
 
 # --- BARRERA DE ENTRADA (LOGIN) ---
 if not st.session_state['autenticado']:
-    col1, col2, col3 = st.columns([1, 1.2, 1])
+    col1, col2, col3 = st.columns([1, 1.2, 1], key="login_columns")
     with col2:
         st.markdown("<br><br><br>", unsafe_allow_html=True)
         st.markdown("<h2 style='text-align: center;'>🔒 Consola Algorítmica TFG</h2>", unsafe_allow_html=True)
@@ -444,7 +444,7 @@ conectado = st.session_state.broker.esta_conectado()
 color_est = "🟢" if conectado else "🔴"
 texto_est = "Conectado" if conectado else "Desconectado"
 
-col_logo, col_cot, col_conn, col_logout = st.columns([7.2, 1.2, 1.5, 1.1], vertical_alignment="center")
+col_logo, col_cot, col_conn, col_logout = st.columns([7.2, 1.2, 1.5, 1.1], vertical_alignment="center", key="top_toolbar_columns")
 
 with col_logo:
     st.markdown("<h2 style='margin:0; font-size:1.8rem; line-height:1.2;'>🏛️ Plataforma Algorítmica Multileg</h2>", unsafe_allow_html=True)
