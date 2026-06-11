@@ -432,7 +432,13 @@ if 'posiciones_cartera' not in st.session_state:
 @st.dialog("🔍 Consultar Cotización")
 def mostrar_dialogo_cotizacion():
     st.markdown("<p style='color:#94a3b8; font-size:0.95rem; margin-top:-10px;'>Consulta la cotización en tiempo real o retardada de cualquier ticker en Interactive Brokers.</p>", unsafe_allow_html=True)
-    ticker_test = st.text_input("Ticker (ej. AAPL, SPY, SPX)", value="SPY", max_chars=5, key="dialog_ticker").upper()
+    ticker_test = st.text_input(
+        "Ticker (ej. AAPL, SPY, SPX)", 
+        value="SPY", 
+        max_chars=5, 
+        key="dialog_ticker",
+        help="**¿Cómo funciona la consulta?**\n\nPara garantizar la obtención del precio bajo cualquier circunstancia (incluso con el mercado cerrado o para activos con baja negociación fuera de horas como NVR, BBVA o IBKR), la plataforma realiza una consulta directa de **barras históricas diarias (de resolución 1 día) de los últimos 5 días**.\n\nEsto permite extraer de forma inmediata el **último precio de cierre oficial registrado** (si el mercado está cerrado) o la **cotización en tiempo real actualizada** (si el mercado está abierto), evitando el uso de flujos asíncronos y sin consumir los límites de suscripción en tiempo real de la API de Interactive Brokers."
+    ).upper()
     
     if st.button("Consultar", use_container_width=True, type="primary"):
         conectado = st.session_state.broker.esta_conectado()
