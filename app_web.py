@@ -176,6 +176,20 @@ st.markdown("""
         transform: translateY(1px);
     }
     
+    /* Top Toolbar Smaller Buttons */
+    div[class*="st-key-btn_top_"] button {
+        padding: 6px 14px !important;
+        font-size: 0.85rem !important;
+        border-radius: 8px !important;
+        box-shadow: 0 2px 8px rgba(79, 70, 229, 0.3) !important;
+        height: 34px !important;
+        min-height: 34px !important;
+        line-height: 1.2 !important;
+    }
+    div[class*="st-key-btn_top_"] button:hover {
+        box-shadow: 0 4px 12px rgba(79, 70, 229, 0.5) !important;
+    }
+    
     /* Alert cards custom styles */
     .stAlert {
         border-radius: 12px !important;
@@ -437,7 +451,7 @@ with col_logo:
     st.markdown("<p style='color: #94a3b8; font-size: 0.9rem; margin:0;'>Watchdogs en segundo plano, sensibilidades Black-Scholes y gestión de riesgo</p>", unsafe_allow_html=True)
 
 with col_cot:
-    if st.button("🔍 Probar Ticker", use_container_width=True, key="btn_top_cot"):
+    if st.button("Probar Ticker", use_container_width=True, key="btn_top_cot"):
         mostrar_dialogo_cotizacion()
 
 with col_conn:
@@ -449,7 +463,7 @@ with col_conn:
         st.rerun()
 
 with col_logout:
-    if st.button("🚪 Salir", use_container_width=True, key="btn_top_logout"):
+    if st.button("Salir", use_container_width=True, key="btn_top_logout"):
         st.session_state['autenticado'] = False
         if st.session_state.broker.esta_conectado():
             st.session_state.broker.desconectar()
