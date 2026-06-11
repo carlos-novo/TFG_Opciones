@@ -568,7 +568,7 @@ with tabs[1]:
     st.divider()
     
     # Condiciones de Entrada
-    st.subheader("🛠️ Condiciones de Entrada Avanzadas (Watchdog)")
+    st.subheader("Condiciones de Entrada Avanzadas")
     st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Activa las condiciones que deben cumplirse antes de que el Watchdog envíe la orden al mercado.</p>", unsafe_allow_html=True)
 
     _W  = [1.5, 0.7, 1.1, 0.9]  # Anchos idénticos en todas las filas → columnas alineadas
@@ -577,7 +577,7 @@ with tabs[1]:
     # Fila: Ventana Horaria
     _c0, _c1, _c2, _c3 = st.columns(_W)
     with _c0:
-        act_horario = st.toggle("🕰️ Ventana Horaria", value=False, key="acc_act_horario")
+        act_horario = st.toggle("Ventana Horaria", value=False, key="acc_act_horario")
     if act_horario:
         tipo_horario = _c1.selectbox("", ["Rango", "Hora Fija"], key="acc_tipo_horario", label_visibility="collapsed")
         h_ini_acc    = _c2.text_input("", value="15:30", key="acc_h_ini", label_visibility="collapsed")
@@ -596,7 +596,7 @@ with tabs[1]:
     # Fila: Filtro VIX
     _c0, _c1, _c2, _c3 = st.columns(_W)
     with _c0:
-        act_vix = st.toggle("📊 Filtro VIX", value=False, key="acc_act_vix")
+        act_vix = st.toggle("Filtro VIX", value=False, key="acc_act_vix")
     if act_vix:
         vix_op_acc  = _c1.selectbox("", ["<", "<=", ">", ">="], key="acc_vix_op", label_visibility="collapsed")
         vix_val_acc = _c2.number_input("", min_value=1.0, value=20.0, step=0.5, key="acc_vix_val", label_visibility="collapsed")
@@ -605,7 +605,7 @@ with tabs[1]:
     # Fila: Filtro SMA
     _c0, _c1, _c2, _c3 = st.columns(_W)
     with _c0:
-        act_sma = st.toggle("📈 Filtro SMA", value=False, key="acc_act_sma")
+        act_sma = st.toggle("Filtro SMA", value=False, key="acc_act_sma")
     if act_sma:
         sma_per_acc = _c1.number_input("", min_value=5, value=200, step=5, key="acc_sma_per", label_visibility="collapsed")
         sma_reg_acc = _c2.selectbox("", ["Precio > SMA", "Precio < SMA"], key="acc_sma_reg", label_visibility="collapsed")
@@ -614,7 +614,7 @@ with tabs[1]:
     # Fila: Precio Disparador
     _c0, _c1, _c2, _c3 = st.columns(_W)
     with _c0:
-        act_precio = st.toggle("🎯 Precio Disparador", value=False, key="acc_act_precio")
+        act_precio = st.toggle("Precio Disparador", value=False, key="acc_act_precio")
     if act_precio:
         op_precio_acc  = _c1.selectbox("", ["<=", ">="], key="acc_precio_op", label_visibility="collapsed")
         val_precio_acc = _c2.number_input("", min_value=0.0, value=150.0, step=0.5, key="acc_precio_val", label_visibility="collapsed")
@@ -623,13 +623,13 @@ with tabs[1]:
     # Fila: Frecuencia (siempre visible)
     _c0, _c1, _c2, _c3 = st.columns(_W)
     with _c0:
-        st.markdown("<p style='margin-top:8px; color:#94a3b8; font-size:0.88rem;'>🔁 Frecuencia</p>", unsafe_allow_html=True)
+        st.markdown("<p style='margin-top:8px; color:#94a3b8; font-size:0.88rem;'>Frecuencia</p>", unsafe_allow_html=True)
     frec_acc = _c1.selectbox("", ["Única", "Diaria", "Semanal"], key="acc_frecuencia", label_visibility="collapsed")
             
     st.divider()
     
     # Condiciones de Salida
-    st.subheader("🎯 Condiciones de Salida Avanzadas (Gestión de Riesgo)")
+    st.subheader("Condiciones de Salida Avanzadas")
     st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Activa y configura las reglas de gestión de riesgo que vigilará el Watchdog de Salidas.</p>", unsafe_allow_html=True)
 
     _W  = [1.5, 0.7, 1.1, 0.9]
@@ -638,7 +638,7 @@ with tabs[1]:
     # Fila: Stop Loss / Take Profit
     _c0, _c1, _c2, _c3 = st.columns(_W)
     with _c0:
-        act_sl_tp = st.toggle("🎯 Stop Loss / Take Profit", value=False, key="acc_act_sl_tp")
+        act_sl_tp = st.toggle("Stop Loss / Take Profit", value=False, key="acc_act_sl_tp")
     if act_sl_tp:
         stop_loss_acc   = _c1.number_input("", value=-200.0, step=10.0, key="acc_sl_val", label_visibility="collapsed")
         take_profit_acc = _c2.number_input("", value=400.0, step=10.0, key="acc_tp_val", label_visibility="collapsed")
@@ -648,7 +648,7 @@ with tabs[1]:
     # Fila: Cerrar por VIX
     _c0, _c1, _c2, _c3 = st.columns(_W)
     with _c0:
-        act_vix_salida = st.toggle("🚨 Cerrar por VIX", value=False, key="acc_act_vix_salida")
+        act_vix_salida = st.toggle("Cerrar por VIX", value=False, key="acc_act_vix_salida")
     if act_vix_salida:
         vix_max_acc = _c1.number_input("", min_value=1.0, value=30.0, step=0.5, key="acc_vix_max", label_visibility="collapsed")
     st.markdown(_SP, unsafe_allow_html=True)
@@ -656,7 +656,7 @@ with tabs[1]:
     # Fila: Cerrar por SMA
     _c0, _c1, _c2, _c3 = st.columns(_W)
     with _c0:
-        act_sma_salida = st.toggle("📈 Cerrar por SMA", value=False, key="acc_act_sma_salida")
+        act_sma_salida = st.toggle("Cerrar por SMA", value=False, key="acc_act_sma_salida")
     if act_sma_salida:
         sma_per_sal = _c1.number_input("", min_value=5, value=200, step=5, key="acc_sma_per_sal", label_visibility="collapsed")
         sma_reg_sal = _c2.selectbox("", ["Precio < SMA", "Precio > SMA"], key="acc_sma_reg_sal", label_visibility="collapsed")
@@ -665,7 +665,7 @@ with tabs[1]:
     # Fila: Hora Forzada
     _c0, _c1, _c2, _c3 = st.columns(_W)
     with _c0:
-        act_hora_salida = st.toggle("⏰ Hora Forzada", value=False, key="acc_act_hora_salida")
+        act_hora_salida = st.toggle("Hora Forzada", value=False, key="acc_act_hora_salida")
     if act_hora_salida:
         hora_sal_acc = _c1.text_input("", value="21:45", key="acc_hora_sal", label_visibility="collapsed")
             
@@ -1173,7 +1173,7 @@ with tabs[2]:
         st.divider()
 
         # ── CONDICIONES DE ENTRADA ──────────────────────────────────────────
-        st.subheader("🛠️ Condiciones de Entrada Avanzadas (Watchdog)")
+        st.subheader("Condiciones de Entrada Avanzadas")
         st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Activa las condiciones que deben cumplirse antes de que el Watchdog envíe la orden al mercado.</p>", unsafe_allow_html=True)
 
         _W  = [1.5, 0.7, 1.1, 0.9]
@@ -1182,7 +1182,7 @@ with tabs[2]:
         # Fila: Ventana Horaria
         _c0, _c1, _c2, _c3 = st.columns(_W)
         with _c0:
-            opt_act_horario = st.toggle("🕰️ Ventana Horaria", value=False, key="opt_act_horario")
+            opt_act_horario = st.toggle("Ventana Horaria", value=False, key="opt_act_horario")
         if opt_act_horario:
             opt_tipo_horario = _c1.selectbox("", ["Rango", "Hora Fija"], key="opt_tipo_horario", label_visibility="collapsed")
             o_h_ini          = _c2.text_input("", value="15:45", key="opt_h_ini", label_visibility="collapsed")
@@ -1201,7 +1201,7 @@ with tabs[2]:
         # Fila: Filtro VIX
         _c0, _c1, _c2, _c3 = st.columns(_W)
         with _c0:
-            opt_act_vix = st.toggle("📊 Filtro VIX", value=False, key="opt_act_vix")
+            opt_act_vix = st.toggle("Filtro VIX", value=False, key="opt_act_vix")
         if opt_act_vix:
             opt_vix_op  = _c1.selectbox("", ["<", "<=", ">", ">="], key="opt_vix_op", label_visibility="collapsed")
             opt_vix_val = _c2.number_input("", min_value=1.0, value=20.0, step=0.5, key="opt_vix_val", label_visibility="collapsed")
@@ -1210,7 +1210,7 @@ with tabs[2]:
         # Fila: Filtro SMA
         _c0, _c1, _c2, _c3 = st.columns(_W)
         with _c0:
-            opt_act_sma = st.toggle("📈 Filtro SMA", value=False, key="opt_act_sma")
+            opt_act_sma = st.toggle("Filtro SMA", value=False, key="opt_act_sma")
         if opt_act_sma:
             opt_sma_per = _c1.number_input("", min_value=5, value=200, step=5, key="opt_sma_per", label_visibility="collapsed")
             opt_sma_reg = _c2.selectbox("", ["Precio > SMA", "Precio < SMA"], key="opt_sma_reg", label_visibility="collapsed")
@@ -1219,7 +1219,7 @@ with tabs[2]:
         # Fila: Precio Disparador
         _c0, _c1, _c2, _c3 = st.columns(_W)
         with _c0:
-            opt_act_precio = st.toggle("🎯 Precio Disparador", value=False, key="opt_act_precio")
+            opt_act_precio = st.toggle("Precio Disparador", value=False, key="opt_act_precio")
         if opt_act_precio:
             opt_precio_op  = _c1.selectbox("", ["<=", ">="], key="opt_precio_op", label_visibility="collapsed")
             opt_precio_val = _c2.number_input("", min_value=0.0, value=100.0, step=0.5, key="opt_precio_val", label_visibility="collapsed")
@@ -1228,13 +1228,13 @@ with tabs[2]:
         # Fila: Frecuencia (siempre visible)
         _c0, _c1, _c2, _c3 = st.columns(_W)
         with _c0:
-            st.markdown("<p style='margin-top:8px; color:#94a3b8; font-size:0.88rem;'>🔁 Frecuencia</p>", unsafe_allow_html=True)
+            st.markdown("<p style='margin-top:8px; color:#94a3b8; font-size:0.88rem;'>Frecuencia</p>", unsafe_allow_html=True)
         opt_frecuencia = _c1.selectbox("", ["Única", "Diaria", "Semanal"], key="opt_frecuencia", label_visibility="collapsed")
 
         st.divider()
 
         # ── CONDICIONES DE SALIDA ───────────────────────────────────────────
-        st.subheader("🎯 Condiciones de Salida Avanzadas (Gestión de Riesgo)")
+        st.subheader("Condiciones de Salida Avanzadas")
         st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Activa y configura las reglas de gestión de riesgo que vigilará el Watchdog de Salidas.</p>", unsafe_allow_html=True)
 
         _W  = [1.5, 0.7, 1.1, 0.9]
@@ -1243,7 +1243,7 @@ with tabs[2]:
         # Fila: Stop Loss / Take Profit
         _c0, _c1, _c2, _c3 = st.columns(_W)
         with _c0:
-            opt_act_sl_tp = st.toggle("🎯 Stop Loss / Take Profit", value=False, key="opt_act_sl_tp")
+            opt_act_sl_tp = st.toggle("Stop Loss / Take Profit", value=False, key="opt_act_sl_tp")
         if opt_act_sl_tp:
             opt_stop_loss   = _c1.number_input("", value=-300.0, step=10.0, key="opt_sl_val", label_visibility="collapsed")
             opt_take_profit = _c2.number_input("", value=600.0, step=10.0, key="opt_tp_val", label_visibility="collapsed")
@@ -1253,7 +1253,7 @@ with tabs[2]:
         # Fila: Cerrar por VIX
         _c0, _c1, _c2, _c3 = st.columns(_W)
         with _c0:
-            opt_act_vix_sal = st.toggle("🚨 Cerrar por VIX", value=False, key="opt_act_vix_sal")
+            opt_act_vix_sal = st.toggle("Cerrar por VIX", value=False, key="opt_act_vix_sal")
         if opt_act_vix_sal:
             opt_vix_max = _c1.number_input("", min_value=1.0, value=28.0, step=0.5, key="opt_vix_max", label_visibility="collapsed")
         st.markdown(_SP, unsafe_allow_html=True)
@@ -1261,7 +1261,7 @@ with tabs[2]:
         # Fila: Cerrar por SMA
         _c0, _c1, _c2, _c3 = st.columns(_W)
         with _c0:
-            opt_act_sma_sal = st.toggle("📈 Cerrar por SMA", value=False, key="opt_act_sma_sal")
+            opt_act_sma_sal = st.toggle("Cerrar por SMA", value=False, key="opt_act_sma_sal")
         if opt_act_sma_sal:
             opt_sma_per_sal = _c1.number_input("", min_value=5, value=200, step=5, key="opt_sma_per_sal", label_visibility="collapsed")
             opt_sma_reg_sal = _c2.selectbox("", ["Precio < SMA", "Precio > SMA"], key="opt_sma_reg_sal", label_visibility="collapsed")
@@ -1270,7 +1270,7 @@ with tabs[2]:
         # Fila: Hora Forzada
         _c0, _c1, _c2, _c3 = st.columns(_W)
         with _c0:
-            opt_act_hora_sal = st.toggle("⏰ Hora Forzada", value=False, key="opt_act_hora_sal")
+            opt_act_hora_sal = st.toggle("Hora Forzada", value=False, key="opt_act_hora_sal")
         if opt_act_hora_sal:
             opt_hora_sal = _c1.text_input("", value="21:45", key="opt_hora_sal", label_visibility="collapsed")
 
