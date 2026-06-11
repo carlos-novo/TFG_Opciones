@@ -108,7 +108,7 @@ class GestorIBKR:
         
         ib_temp = IB()
         try:
-            ib_temp.connect(self.host, self.port, clientId=99)
+            ib_temp.connect(self.host, self.port, clientId=random.randint(1000, 999999))
             
             # REGLA DE ORO: SPX es un índice, el resto son Stocks
             if simbolo.upper() == 'SPX':
@@ -150,7 +150,7 @@ class GestorIBKR:
         ib_temp = IB()
         
         try:
-            ib_temp.connect(self.host, self.port, clientId=97)
+            ib_temp.connect(self.host, self.port, clientId=random.randint(1000, 999999))
             
             if simbolo.upper() == 'SPX':
                 contrato = Index(simbolo, 'CBOE', 'USD')
@@ -189,7 +189,7 @@ class GestorIBKR:
         self._asegurar_event_loop()
         ib_temp = IB()
         try:
-            ib_temp.connect(self.host, self.port, clientId=94)
+            ib_temp.connect(self.host, self.port, clientId=random.randint(1000, 999999))
 
             items = ib_temp.portfolio()  # Lista de PortfolioItem
             posiciones = []
@@ -238,7 +238,7 @@ class GestorIBKR:
         self._asegurar_event_loop()
         ib_temp = IB()
         try:
-            ib_temp.connect(self.host, self.port, clientId=93)
+            ib_temp.connect(self.host, self.port, clientId=random.randint(1000, 999999))
             ordenes_abiertas = ib_temp.reqAllOpenOrders()
             ib_temp.sleep(1)
 
@@ -281,7 +281,7 @@ class GestorIBKR:
         ib_temp = IB()
         estados = {}
         try:
-            ib_temp.connect(self.host, self.port, clientId=92)
+            ib_temp.connect(self.host, self.port, clientId=random.randint(1000, 999999))
             
             open_orders = ib_temp.reqAllOpenOrders()
             for trade in open_orders:
@@ -332,7 +332,7 @@ class GestorIBKR:
         self._asegurar_event_loop()
         ib_temp = IB()
         try:
-            ib_temp.connect(self.host, self.port, clientId=96)
+            ib_temp.connect(self.host, self.port, clientId=random.randint(1000, 999999))
             ib_temp.reqMarketDataType(3)
             
             contratos = self.calificar_y_obtener_contratos(ib_temp, ticker, patas)
@@ -387,7 +387,7 @@ class GestorIBKR:
         self._asegurar_event_loop()
         ib_temp = IB()
         try:
-            ib_temp.connect(self.host, self.port, clientId=95)
+            ib_temp.connect(self.host, self.port, clientId=random.randint(1000, 999999))
             ib_temp.reqMarketDataType(3)
 
             contratos = self.calificar_y_obtener_contratos(ib_temp, ticker, patas)
@@ -453,7 +453,7 @@ class GestorIBKR:
         self._asegurar_event_loop()
         ib_temp = IB()
         try:
-            ib_temp.connect(self.host, self.port, clientId=90)
+            ib_temp.connect(self.host, self.port, clientId=random.randint(1000, 999999))
             ib_temp.reqMarketDataType(3)
 
             # Invertimos la dirección de las patas para el cierre
@@ -527,7 +527,7 @@ class GestorIBKR:
         self._asegurar_event_loop()
         ib_temp = IB()
         try:
-            ib_temp.connect(self.host, self.port, clientId=91)
+            ib_temp.connect(self.host, self.port, clientId=random.randint(1000, 999999))
             items = ib_temp.portfolio()
             ib_temp.disconnect()
 
@@ -577,7 +577,7 @@ class GestorIBKR:
             return cleaned
 
         try:
-            ib_temp.connect(self.host, self.port, clientId=93)
+            ib_temp.connect(self.host, self.port, clientId=random.randint(1000, 999999))
             items = ib_temp.portfolio()
             ib_temp.disconnect()
 
@@ -711,7 +711,7 @@ class GestorIBKR:
         self._asegurar_event_loop()
         ib_temp = IB()
         try:
-            ib_temp.connect(self.host, self.port, clientId=89)
+            ib_temp.connect(self.host, self.port, clientId=random.randint(1000, 999999))
             contrato = Stock(ticker, 'SMART', 'USD')
             ib_temp.qualifyContracts(contrato)
             
