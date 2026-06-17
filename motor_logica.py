@@ -322,3 +322,129 @@ class MotorSalida:
             "motivo": "No se cumplió ninguna condición de salida",
             "detalles": {"pnl_actual": pnl_actual}
         }
+
+    @staticmethod
+    def calcular_pnl_expiracion(patas, precio_cierre):
+        """
+        Calcula el P&L realizado final y el desglose de liquidación pata por pata
+        para una estrategia de opciones en su fecha de vencimiento.
+        """
+        pnl_neto_usd = 0.0
+        detalles_patas = []
+        
+        for idx, pata in enumerate(patas):
+            tipo = pata.get("tipo_activo", "OPTION").upper()
+            if tipo == "STOCK":
+                # Las acciones no expiran por tiempo
+                continue
+                
+            strike = float(pata.get("strike", 0.0))
+            right = pata.get("right", "C").upper()
+            cantidad = int(pata.get("cantidad", 1))
+            accion = pata.get("accion", "BUY").upper()
+            precio_entrada_pata = float(pata.get("precio_entrada", 0.0))
+            
+            # Payoff unitario en la fecha de liquidación
+            payoff_unitario = 0.0
+            if right in ("C", "CALL"):
+                payoff_unitario = max(0.0, precio_cierre - strike)
+            elif right in ("P", "PUT"):
+                payoff_unitario = max(0.0, strike - precio_cierre)
+                
+            # Calcular P&L neto para esta pata (multiplicador 100 estándar para opciones de EE. UU.)
+            multiplicador = 100.0
+            if accion == "BUY":
+                pnl_pata = (payoff_unitario - precio_entrada_pata) * cantidad * multiplicador
+            else: # SELL
+                pnl_pata = (precio_entrada_pata - payoff_unitario) * cantidad * multiplicador
+                
+            pnl_neto_usd += pnl_pata
+            estado_pata = "ITM" if payoff_unitario > 0.0 else "OTM"
+            
+            detalles_patas.append({
+                "num_pata": idx + 1,
+                "strike": strike,
+                "right": right,
+                "accion": accion,
+                "cantidad": cantidad,
+                "precio_entrada": precio_entrada_pata,
+                "payoff_unitario": round(payoff_unitario, 4),
+                "estado": estado_pata,
+                "liquidada_total": round(pnl_pata, 2)
+            })
+            
+        return {
+            "pnl_realizado": round(pnl_neto_usd, 2),
+            "detalles": detalles_patas
+        }
+
+    @staticmethod
+    def detectar_nombre_estrategia(tipo_activo, patas):
+        """
+        Analiza las patas para identificar y devolver el nombre estándar de la estrategia de opciones.
+        """
+        if tipo_activo.upper() == "STOCK":
+            return "Acciones Direccionales"
+            
+        opciones = [p for p in patas if p.get("tipo_activo", "OPTION").upper() in ("OPTION", "OPT", "BAG")]
+        if not opciones:
+            return "Acciones"
+            
+        n = len(opciones)
+        if n == 1:
+            p = opciones[0]
+            accion = "Compra" if p.get("accion", "BUY").upper() == "BUY" else "Venta"
+            tipo_opt = "Call" if p.get("right", "C").upper() in ("C", "CALL") else "Put"
+            return f"{accion} de {tipo_opt}"
+            
+        elif n == 2:
+            p1, p2 = opciones[0], opciones[1]
+            r1, r2 = p1.get("right", "C").upper()[0], p2.get("right", "C").upper()[0]
+            a1, a2 = p1.get("accion", "BUY").upper(), p2.get("accion", "BUY").upper()
+            k1, k2 = float(p1.get("strike", 0.0)), float(p2.get("strike", 0.0))
+            
+            if r1 == "P" and r2 == "P": # Ambos Puts
+                if a1 != a2: # Un Buy y un Sell -> Put Spread
+                    sell_strike = k1 if a1 == "SELL" else k2
+                    buy_strike = k1 if a1 == "BUY" else k2
+                    if sell_strike > buy_strike:
+                        return "Bull Put Spread (Credit)"
+                    else:
+                        return "Bear Put Spread (Debit)"
+                elif a1 == "BUY" and a2 == "BUY":
+                    if k1 == k2:
+                        return "Double Long Put"
+                    return "Long Put Strangle/Spread"
+                return "Put Spread"
+                
+            elif r1 == "C" and r2 == "C": # Ambos Calls
+                if a1 != a2: # Un Buy y un Sell -> Call Spread
+                    sell_strike = k1 if a1 == "SELL" else k2
+                    buy_strike = k1 if a1 == "BUY" else k2
+                    if sell_strike < buy_strike:
+                        return "Bear Call Spread (Credit)"
+                    else:
+                        return "Bull Call Spread (Debit)"
+                return "Call Spread"
+                
+            elif r1 != r2: # Uno Call y otro Put
+                if a1 == a2:
+                    if k1 == k2:
+                        accion = "Long" if a1 == "BUY" else "Short"
+                        return f"{accion} Straddle"
+                    else:
+                        accion = "Long" if a1 == "BUY" else "Short"
+                        return f"{accion} Strangle"
+                return "Combo Call/Put"
+                
+        elif n == 4:
+            calls = [p for p in opciones if p.get("right", "C").upper()[0] == "C"]
+            puts = [p for p in opciones if p.get("right", "C").upper()[0] == "P"]
+            if len(calls) == 2 and len(puts) == 2:
+                c_actions = [p.get("accion", "BUY").upper() for p in calls]
+                p_actions = [p.get("accion", "BUY").upper() for p in puts]
+                if "BUY" in c_actions and "SELL" in c_actions and "BUY" in p_actions and "SELL" in p_actions:
+                    return "Iron Condor"
+            return "Mariposa / Condor / Multileg"
+            
+        return "Estrategia Multileg Combo"

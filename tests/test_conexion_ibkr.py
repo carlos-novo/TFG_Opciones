@@ -5,8 +5,9 @@ from conexion_ibkr import GestorIBKR
 
 @pytest.fixture
 def gestor():
-    # Instanciamos el gestor de prueba
-    return GestorIBKR(host="127.0.0.1", port=4002)
+    # Instanciamos el gestor de prueba con IB mockeado
+    with patch('conexion_ibkr.IB'):
+        return GestorIBKR(host="127.0.0.1", port=4002)
 
 def test_calificar_y_obtener_contratos_stock(gestor):
     ib_mock = MagicMock()
@@ -72,6 +73,7 @@ def test_construir_contrato_bag_dinamico(gestor):
 @patch('conexion_ibkr.IB')
 def test_enviar_orden_generica_stock_limit(mock_ib_class, gestor):
     ib_instance = mock_ib_class.return_value
+    gestor.ib = ib_instance
     ib_instance.connect = MagicMock()
     ib_instance.isConnected = MagicMock(return_value=True)
     
@@ -111,6 +113,7 @@ def test_enviar_orden_generica_stock_limit(mock_ib_class, gestor):
 @patch('conexion_ibkr.IB')
 def test_enviar_orden_generica_bag_credito(mock_ib_class, gestor):
     ib_instance = mock_ib_class.return_value
+    gestor.ib = ib_instance
     ib_instance.connect = MagicMock()
     ib_instance.isConnected = MagicMock(return_value=True)
     
@@ -154,6 +157,7 @@ def test_enviar_orden_generica_bag_credito(mock_ib_class, gestor):
 @patch('conexion_ibkr.IB')
 def test_enviar_orden_cierre_generica_invertida(mock_ib_class, gestor):
     ib_instance = mock_ib_class.return_value
+    gestor.ib = ib_instance
     ib_instance.connect = MagicMock()
     ib_instance.isConnected = MagicMock(return_value=True)
     
@@ -191,6 +195,7 @@ def test_enviar_orden_cierre_generica_invertida(mock_ib_class, gestor):
 @patch('conexion_ibkr.IB')
 def test_obtener_pnl_posiciones_filtrado(mock_ib_class, gestor):
     ib_instance = mock_ib_class.return_value
+    gestor.ib = ib_instance
     ib_instance.connect = MagicMock()
     ib_instance.isConnected = MagicMock(return_value=True)
     

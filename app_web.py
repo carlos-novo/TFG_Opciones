@@ -20,14 +20,21 @@ from watchdogs import iniciar_watchdog_entradas, iniciar_watchdog_salidas, deten
 # Inicialización de la base de datos
 db = GestorBaseDatos()
 
+# --- CONEXIÓN GLOBAL AL BRÓKER ---
+@st.cache_resource(on_release=lambda b: b.desconectar())
+def obtener_broker_global():
+    return GestorIBKR(port=4002, client_id=1)
+
+broker_global = obtener_broker_global()
+
 # --- INICIALIZACIÓN GLOBAL DE WATCHDOGS (HITO 4) ---
-@st.cache_resource
-def iniciar_watchdogs_globales():
+@st.cache_resource(on_release=lambda x: detener_watchdogs())
+def iniciar_watchdogs_globales(_broker):
     """Inicializa una única vez los watchdogs en segundo plano de entrada y salida."""
     try:
         # Iniciamos el watchdog de entradas (cada 30s) y de salidas (cada 15s)
-        hilo_ent = iniciar_watchdog_entradas(db_name="tfg_trading.db", interval=30)
-        hilo_sal = iniciar_watchdog_salidas(db_name="tfg_trading.db", interval=15)
+        hilo_ent = iniciar_watchdog_entradas(db_name="tfg_trading.db", interval=30, broker=_broker)
+        hilo_sal = iniciar_watchdog_salidas(db_name="tfg_trading.db", interval=15, broker=_broker)
         db.registrar_evento("WATCHDOGS_INICIADOS_UI", "Watchdogs globales arrancados desde el frontend.")
         return hilo_ent, hilo_sal
     except Exception as e:
@@ -35,7 +42,250 @@ def iniciar_watchdogs_globales():
         return None, None
 
 # Arrancamos los watchdogs
-hilo_ent_glob, hilo_sal_glob = iniciar_watchdogs_globales()
+hilo_ent_glob, hilo_sal_glob = iniciar_watchdogs_globales(broker_global)
+
+# --- COMPONENTE DE TARJETA DE CONDICIÓN (WATCHDOG CARD) ---
+def render_watchdog_card(titulo, toggle_key, fields_fn):
+    toggle_val = st.session_state.get(toggle_key, False)
+    card_key = f"wd_card_{toggle_key}_{'active' if toggle_val else 'inactive'}"
+    
+    with st.container(key=card_key):
+        col_title, col_toggle = st.columns([3, 1], vertical_alignment="center")
+        with col_title:
+            st.markdown(f"<span style='font-size: 1rem; font-weight: 600; color: #ffffff;'>{titulo}</span>", unsafe_allow_html=True)
+        with col_toggle:
+            toggle_state = st.toggle(titulo, value=toggle_val, key=toggle_key, label_visibility="collapsed")
+            
+        st.markdown("<hr style='margin: 8px 0; opacity: 0.08;' />", unsafe_allow_html=True)
+        res = fields_fn(not toggle_state)
+        
+    return toggle_state, res
+
+# --- DIALOG WRAPPER DE STREAMLIT ---
+if hasattr(st, "dialog"):
+    st_dialog = st.dialog
+elif hasattr(st, "experimental_dialog"):
+    st_dialog = st.experimental_dialog
+else:
+    def st_dialog(title):
+        def decorator(func):
+            return func
+        return decorator
+
+@st_dialog("Detalle de Posición")
+def mostrar_detalle_posicion(pos):
+    simbolo = pos.get('Símbolo')
+    tipo = pos.get('Tipo')
+    qty = pos.get('Posición', 0.0)
+    avg_cost = pos.get('Precio Medio', 0.0)
+    mkt_val = pos.get('Valor Mercado', 0.0)
+    pnl = pos.get('P&L No Real.', 0.0)
+    
+    # 1. Tarjetas de KPIs (Métricas del Activo)
+    # Definición y enlace de variables matemáticas reales de la posición
+    average_cost = avg_cost
+    position_size = qty
+    multiplier = 100.0 if tipo in ("Opción", "OPT", "Option") else 1.0
+    
+    # Tarjeta 2 (Precio Actual Mercado): marketPrice
+    market_price = mkt_val / (position_size * multiplier) if (position_size != 0 and multiplier != 0) else average_cost
+    
+    # Tarjeta 3 (Valor Total Invertido): averageCost * position_size
+    # Usamos valor absoluto de la posición para representar de forma intuitiva el capital implicado
+    total_invertido = average_cost * abs(position_size) * multiplier
+    
+    # Tarjeta 4 (Valor Total Mercado): marketPrice * position_size (o el marketValue directo)
+    total_mercado = market_price * abs(position_size) * multiplier
+    
+    # P&L no realizado y rentabilidad para el 'badge' delta
+    pnl_sign = "+" if pnl >= 0 else "-"
+    rent_pct = (pnl / total_invertido * 100) if total_invertido != 0 else 0.0
+    delta_str = f"{pnl_sign}${abs(pnl):,.2f} ({pnl_sign}{rent_pct:.2f}%)"
+    
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("Precio Compra Medio", f"${average_cost:,.2f}")
+    with c2:
+        st.metric("Precio Actual Mercado", f"${market_price:,.2f}")
+    with c3:
+        st.metric("Valor Total Invertido", f"${total_invertido:,.2f}")
+    with c4:
+        st.metric("Valor Total Mercado", f"${total_mercado:,.2f}", delta=delta_str if total_invertido != 0 else None)
+    
+    st.markdown("<hr style='opacity: 0.1; margin: 15px 0;' />", unsafe_allow_html=True)
+    
+    num_pos_str = f"{int(qty)}" if float(qty).is_integer() else f"{qty}"
+    st.markdown(f"<p style='color: #cbd5e1; font-size: 0.95rem; margin-top: -5px; margin-bottom: 15px; text-align: left;'><b>Número de posiciones:</b> {num_pos_str}</p>", unsafe_allow_html=True)
+    
+    # 2. Gráfica de Evolución Temporal del Activo (Plotly)
+    import numpy as np
+    import datetime as dt_mod
+    import json
+    
+    # Función auxiliar para parsear fechas de base de datos
+    def parse_date(date_str):
+        if not date_str:
+            return None
+        try:
+            t_str = str(date_str).replace("T", " ")
+            parts = t_str.split(" ")
+            return dt_mod.datetime.strptime(parts[0], "%Y-%m-%d").date()
+        except:
+            return None
+
+    # Recuperamos el historial de estrategias del ticker desde la base de datos
+    ticker_strategies = []
+    try:
+        todas_est = db.obtener_estrategias()
+        ticker_strategies = [e for e in todas_est if e.get("ticker", "").upper() == simbolo.upper()]
+    except Exception as e_db:
+        print(f"Error al obtener estrategias para el historial: {e_db}")
+
+    # Rango de fechas (últimos 30 días)
+    dates = [dt_mod.date.today() - dt_mod.timedelta(days=i) for i in range(30)]
+    dates.reverse()
+
+    # Procesar histórico de patas activas por estrategia
+    active_legs_history = []
+    for est in ticker_strategies:
+        dt_ej = parse_date(est.get("fecha_ejecucion"))
+        dt_ci = parse_date(est.get("fecha_cierre"))
+        
+        if dt_ej is None:
+            continue
+            
+        patas = est.get("patas", [])
+        if not patas and est.get("patas_json"):
+            try:
+                patas = json.loads(est["patas_json"])
+            except:
+                pass
+                
+        for leg in patas:
+            leg_tipo = leg.get("tipo_activo", "").upper()
+            mult = 100.0 if leg_tipo in ("OPCIÓN", "OPT", "OPTION") else 1.0
+            cant = float(leg.get("cantidad", 0.0))
+            accion = leg.get("accion", "BUY").upper()
+            signo = 1.0 if accion == "BUY" else -1.0
+            
+            active_legs_history.append({
+                "entry_date": dt_ej,
+                "close_date": dt_ci,
+                "qty": signo * cant,
+                "entry_price": float(est.get("precio_entrada") or 0.0),
+                "multiplier": mult
+            })
+
+    # Si no tenemos registros históricos pero sí hay posición real del bróker,
+    # inyectamos una posición virtual que abarque todo el periodo para no vaciar el gráfico.
+    if not active_legs_history and position_size != 0:
+        active_legs_history.append({
+            "entry_date": dates[0],
+            "close_date": None,
+            "qty": position_size,
+            "entry_price": average_cost,
+            "multiplier": multiplier
+        })
+
+    # Generamos una serie temporal de precios simulados para el activo, finalizando en el precio de mercado real
+    np.random.seed(hash(simbolo) % 1234567)
+    price_steps = np.random.normal(loc=0.0, scale=0.015, size=30)
+    simulated_prices = []
+    curr_price = market_price
+    for step in reversed(price_steps):
+        simulated_prices.append(curr_price)
+        curr_price = curr_price / (1.0 + step)
+    simulated_prices.reverse()
+
+    # Reconstruimos la Base Invertida y el Valor de Mercado día a día
+    base_invertida_series = []
+    valor_mercado_series = []
+
+    for i, d in enumerate(dates):
+        base_signed = 0.0
+        for leg in active_legs_history:
+            if leg["entry_date"] <= d and (leg["close_date"] is None or leg["close_date"] > d):
+                base_signed += leg["qty"] * leg["entry_price"] * leg["multiplier"]
+        
+        # Guardamos en valor absoluto para que la exposición/capital invertido sea siempre positiva e intuitiva
+        base_invertida_series.append(abs(base_signed))
+        
+        # El Valor Mercado (Línea Azul) debe marcar siempre el valor de mercado de la acción (escalado a la posición actual), no solo cuando se poseía
+        valor_mercado_series.append(abs(position_size) * simulated_prices[i] * multiplier)
+
+    # Forzar el último día para sincronizarlo al 100% con los datos exactos del bróker (KPI cards)
+    if len(dates) > 0:
+        base_invertida_series[-1] = total_invertido
+        valor_mercado_series[-1] = total_mercado
+
+    fig = go.Figure()
+    
+    # Curva de Valor
+    fig.add_trace(go.Scatter(
+        x=dates,
+        y=valor_mercado_series,
+        mode='lines',
+        line=dict(color='#6366f1', width=3, shape='spline'),
+        fill='tozeroy',
+        fillcolor='rgba(99, 102, 241, 0.06)',
+        name='Valor Mercado',
+        hovertemplate='<b>Fecha</b>: %{x}<br><b>Valor</b>: $%{y:,.2f}<extra></extra>'
+    ))
+    
+    # Línea base (Valor Invertido)
+    fig.add_trace(go.Scatter(
+        x=dates,
+        y=base_invertida_series,
+        mode='lines',
+        line=dict(color='rgba(255, 255, 255, 0.25)', width=1, dash='dash', shape='hv'),
+        name='Base Invertida',
+        hovertemplate='Invertido: $%{y:,.2f}<extra></extra>'
+    ))
+    
+    fig.update_layout(
+        title=dict(
+            text=f"<b>Evolución del Valor de la Posición en {simbolo} (Últimos 30 días)</b>",
+            font=dict(size=13, color='#ffffff')
+        ),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(color='#94a3b8', family='Outfit, Inter, sans-serif'),
+        margin=dict(t=50, b=15, l=40, r=20),
+        height=260,
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+            font=dict(size=10)
+        ),
+        xaxis=dict(
+            showgrid=True,
+            gridcolor='rgba(255,255,255,0.03)',
+            zeroline=False,
+            rangeselector=dict(
+                buttons=list([
+                    dict(count=7, label="1W", step="day", stepmode="backward"),
+                    dict(count=15, label="15D", step="day", stepmode="backward"),
+                    dict(count=30, label="1M", step="day", stepmode="backward"),
+                    dict(step="all", label="ALL")
+                ]),
+                bgcolor="rgba(30, 41, 59, 0.6)",
+                activecolor="rgba(99, 102, 241, 0.4)",
+                font=dict(color="#ffffff", size=9)
+            )
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor='rgba(255,255,255,0.03)',
+            zeroline=False,
+            tickformat="$,.0f"
+        )
+    )
+    
+    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Plataforma de Trading Multileg", layout="wide")
@@ -61,10 +311,20 @@ st.markdown("""
     }
     
     /* Header styling */
-    h1, h2, h3, h4, h5, h6 {
+    h2, h3, h4, h5, h6,
+    [data-testid="stMarkdownContainer"] h2,
+    [data-testid="stMarkdownContainer"] h3,
+    [data-testid="stMarkdownContainer"] h4,
+    [data-testid="stMarkdownContainer"] h5,
+    [data-testid="stMarkdownContainer"] h6,
+    .stHeading h2,
+    .stHeading h3,
+    .stHeading h4,
+    .stHeading h5,
+    .stHeading h6 {
         font-family: 'Outfit', sans-serif;
         font-weight: 600;
-        color: #ffffff;
+        color: #ffffff !important;
         letter-spacing: -0.02em;
     }
     
@@ -75,6 +335,16 @@ st.markdown("""
     }
     
     /* Card Glassmorphism */
+    /* Centered wider dialog card (120% of 650px = 780px), without restricting backdrop overlay */
+    div[role="dialog"],
+    div[data-baseweb="modal"] [role="dialog"],
+    div[data-testid="stDialog"] [role="dialog"],
+    div[class*="stDialog"] [role="dialog"] {
+        width: 780px !important;
+        max-width: 90vw !important;
+        margin: auto !important; /* Keep modal centered horizontally and vertically */
+    }
+    
     div[data-testid="stMetric"] {
         background: rgba(255, 255, 255, 0.02);
         border: 1px solid rgba(255, 255, 255, 0.05);
@@ -91,10 +361,43 @@ st.markdown("""
         transform: translateY(-3px);
     }
     
-    /* Metric values in theme blue */
+    /* Prevent metric label truncation & force wrapping */
+    div[data-testid="stMetric"] [data-testid="stMetricLabel"] {
+        white-space: normal !important;
+        word-wrap: break-word !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+        font-size: 0.85rem !important;
+        line-height: 1.25 !important;
+        min-height: 2.2rem !important;
+        display: flex !important;
+        align-items: center !important;
+    }
+    div[data-testid="stMetric"] [data-testid="stMetricLabel"] > div {
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+    }
+    
+    /* Metric values in theme blue, sized to match the header, preventing truncation */
     div[data-testid="stMetricValue"],
     div[data-testid="stMetricValue"] * {
         color: #6366f1 !important;
+        font-size: 0.85rem !important;
+        white-space: normal !important;
+        word-wrap: break-word !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+    }
+    
+    /* Metric delta values styling */
+    div[data-testid="stMetricDelta"],
+    div[data-testid="stMetricDelta"] * {
+        font-size: 0.75rem !important;
+        white-space: normal !important;
+        word-wrap: break-word !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
     }
     
     /* Tabs customization */
@@ -369,14 +672,20 @@ st.markdown("""
 
     /* Custom Strategy Card Container */
     div[class*="st-key-strategy_card_"] {
-        background: rgba(255, 255, 255, 0.02) !important;
-        border: 1px solid rgba(99, 102, 241, 0.2) !important;
+        background: rgba(13, 14, 21, 0.8) !important;
+        border: 1px solid rgba(99, 102, 241, 0.25) !important;
         border-radius: 12px !important;
         padding: 20px !important;
         margin-bottom: 15px !important;
-        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37) !important;
+        box-shadow: 0 10px 40px rgba(99, 102, 241, 0.08) !important;
         backdrop-filter: blur(10px) !important;
         -webkit-backdrop-filter: blur(10px) !important;
+        transition: all 0.3s ease !important;
+    }
+    div[class*="st-key-strategy_card_"]:hover {
+        border-color: rgba(99, 102, 241, 0.5) !important;
+        box-shadow: 0 10px 40px rgba(99, 102, 241, 0.2) !important;
+        transform: translateY(-2px);
     }
 
     /* Login Form Card Styling */
@@ -406,6 +715,175 @@ st.markdown("""
         -webkit-background-clip: text !important;
         -webkit-text-fill-color: transparent !important;
         color: transparent !important;
+    }
+
+    /* MyInvestor Portfolio Card */
+    .portfolio-summary-card {
+        background: rgba(13, 14, 21, 0.8) !important;
+        border: 1px solid rgba(99, 102, 241, 0.25) !important;
+        border-radius: 16px !important;
+        padding: 24px !important;
+        box-shadow: 0 10px 40px rgba(99, 102, 241, 0.08) !important;
+        backdrop-filter: blur(10px) !important;
+        -webkit-backdrop-filter: blur(10px) !important;
+        margin-bottom: 25px !important;
+        transition: all 0.3s ease !important;
+    }
+    .portfolio-summary-card:hover {
+        border-color: rgba(99, 102, 241, 0.5) !important;
+        box-shadow: 0 10px 40px rgba(99, 102, 241, 0.2) !important;
+        transform: translateY(-2px);
+    }
+    
+    /* Active list items for assets */
+    .asset-list-container {
+        background: rgba(13, 14, 21, 0.8) !important;
+        border: 1px solid rgba(99, 102, 241, 0.25) !important;
+        border-radius: 12px !important;
+        padding: 10px 20px !important;
+        margin-top: 10px !important;
+        box-shadow: 0 10px 40px rgba(99, 102, 241, 0.08) !important;
+        transition: all 0.3s ease !important;
+    }
+    .asset-list-container:hover {
+        border-color: rgba(99, 102, 241, 0.5) !important;
+        box-shadow: 0 10px 40px rgba(99, 102, 241, 0.2) !important;
+    }
+    
+    .asset-item-row {
+        display: flex !important;
+        justify-content: space-between !important;
+        align-items: center !important;
+        padding: 14px 0 !important;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
+        transition: all 0.2s ease !important;
+    }
+    .asset-item-row:last-child {
+        border-bottom: none !important;
+    }
+    .asset-item-row:hover {
+        background-color: rgba(255, 255, 255, 0.02) !important;
+        cursor: pointer !important;
+    }
+    
+    .asset-name {
+        font-weight: 600 !important;
+        color: #ffffff !important;
+        font-size: 1.05rem !important;
+    }
+    .asset-type-badge {
+        font-size: 0.75rem !important;
+        background-color: rgba(99, 102, 241, 0.15) !important;
+        color: #6366f1 !important;
+        padding: 2px 6px !important;
+        border-radius: 4px !important;
+        margin-left: 8px !important;
+        font-weight: bold !important;
+        display: inline-block !important;
+    }
+    .asset-values {
+        text-align: right !important;
+    }
+    .asset-mkt-val {
+        font-weight: 700 !important;
+        color: #ffffff !important;
+        font-size: 1.1rem !important;
+    }
+    .asset-pnl {
+        font-size: 0.9rem !important;
+        font-weight: 600 !important;
+        margin-top: 2px !important;
+    }
+
+    /* Watchdog Cards Styling */
+    div[class*="st-key-wd_card_"] {
+        border-radius: 12px !important;
+        padding: 16px 20px !important;
+        margin-bottom: 15px !important;
+        backdrop-filter: blur(10px) !important;
+        -webkit-backdrop-filter: blur(10px) !important;
+        transition: all 0.3s ease !important;
+    }
+    
+    /* Estado Inactivo: Ghost/Faded */
+    div[class*="st-key-wd_card_"][class*="_inactive"] {
+        background: rgba(20, 21, 30, 0.4) !important;
+        border: 1px solid rgba(255, 255, 255, 0.04) !important;
+        opacity: 0.45;
+    }
+    
+    /* Estado Activo: Glow azul */
+    div[class*="st-key-wd_card_"][class*="_active"] {
+        background: rgba(13, 14, 21, 0.8) !important;
+        border: 1px solid rgba(99, 102, 241, 0.25) !important;
+        box-shadow: 0 8px 30px rgba(99, 102, 241, 0.12) !important;
+        opacity: 1;
+    }
+    
+    /* Estilos Premium para Contenedores de Gráficos */
+    div[class*="st-key-chart_"] {
+        background: rgba(13, 14, 21, 0.6) !important;
+        border: 1px solid rgba(99, 102, 241, 0.15) !important;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.37) !important;
+        border-radius: 12px !important;
+        padding: 15px !important;
+        margin-bottom: 20px !important;
+        backdrop-filter: blur(10px) !important;
+        -webkit-backdrop-filter: blur(10px) !important;
+        transition: all 0.3s ease !important;
+    }
+    div[class*="st-key-chart_"]:hover {
+        border-color: rgba(99, 102, 241, 0.35) !important;
+        box-shadow: 0 10px 40px rgba(99, 102, 241, 0.15) !important;
+    }
+    
+    /* Contenedor principal de la lista de activos */
+    div[class*="st-key-asset_list_container_"] {
+        background: rgba(13, 14, 21, 0.8) !important;
+        border: 1px solid rgba(99, 102, 241, 0.25) !important;
+        border-radius: 12px !important;
+        padding: 10px 20px !important;
+        margin-top: 10px !important;
+        box-shadow: 0 10px 40px rgba(99, 102, 241, 0.08) !important;
+        transition: all 0.3s ease !important;
+    }
+    div[class*="st-key-asset_list_container_"]:hover {
+        border-color: rgba(99, 102, 241, 0.5) !important;
+        box-shadow: 0 10px 40px rgba(99, 102, 241, 0.2) !important;
+    }
+    
+    /* Filas individuales de activos */
+    div[class*="st-key-asset_row_"] {
+        padding: 5px 0 !important;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
+        transition: all 0.2s ease !important;
+    }
+    div[class*="st-key-asset_row_"]:last-child {
+        border-bottom: none !important;
+    }
+    div[class*="st-key-asset_row_"]:hover {
+        background-color: rgba(255, 255, 255, 0.015) !important;
+    }
+    
+    /* Botón Ver Detalles - estilo premium discreto */
+    div[class*="st-key-btn_details_"] button {
+        background: rgba(99, 102, 241, 0.08) !important;
+        color: #818cf8 !important;
+        border: 1px solid rgba(99, 102, 241, 0.2) !important;
+        border-radius: 6px !important;
+        font-size: 0.8rem !important;
+        font-weight: 600 !important;
+        padding: 2px 8px !important;
+        transition: all 0.2s ease !important;
+        height: auto !important;
+        min-height: unset !important;
+        line-height: 1.2 !important;
+    }
+    div[class*="st-key-btn_details_"] button:hover {
+        background: rgba(99, 102, 241, 0.2) !important;
+        border-color: rgba(99, 102, 241, 0.45) !important;
+        color: #ffffff !important;
+        box-shadow: 0 0 10px rgba(99, 102, 241, 0.15) !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -447,13 +925,13 @@ if not st.session_state['autenticado']:
 
 # --- APLICACIÓN PRINCIPAL (AUTENTICADO) ---
 if 'broker' not in st.session_state:
-    st.session_state.broker = GestorIBKR(port=4002)
+    st.session_state.broker = obtener_broker_global()
 
 if 'posiciones_cartera' not in st.session_state:
     st.session_state['posiciones_cartera'] = None
 
 # --- DIÁLOGO DE CONSULTA DE COTIZACIONES (POPUP MODAL) ---
-@st.dialog("🔍 Consultar Cotización")
+@st.dialog("Consultar Cotización")
 def mostrar_dialogo_cotizacion():
     st.markdown("<p style='color:#94a3b8; font-size:0.95rem; margin-top:-10px;'>Consulta la cotización en tiempo real o retardada de cualquier ticker en Interactive Brokers.</p>", unsafe_allow_html=True)
     ticker_test = st.text_input(
@@ -468,11 +946,24 @@ def mostrar_dialogo_cotizacion():
         conectado = st.session_state.broker.esta_conectado()
         if conectado:
             with st.spinner("Consultando en IBKR..."):
-                precio = st.session_state.broker.obtener_precio_prueba(ticker_test)
-                if precio:
-                    st.success(f"📈 Última cotización de **{ticker_test}**: **${precio:.2f}**")
-                else:
-                    st.error("❌ Fallo en la consulta. Verifica que el ticker sea válido y el mercado esté abierto.")
+                try:
+                    precio = st.session_state.broker.obtener_precio_prueba(ticker_test)
+                    if precio:
+                        st.success(f"Última cotización de **{ticker_test}**: **${precio:.2f}**")
+                    else:
+                        if ticker_test == "SPX":
+                            mock_p = 7267.65
+                        elif ticker_test == "SPY":
+                            mock_p = 520.45
+                        elif ticker_test == "AAPL":
+                            mock_p = 180.50
+                        else:
+                            mock_p = 150.00
+                        st.warning(f"⚠️ [Fallo de Datos] No se pudo obtener cotización real de IBKR. Cotización de referencia: **${mock_p:.2f}**")
+                except TimeoutError:
+                    st.error("Tiempo de espera agotado al consultar a IBKR. Por favor, reintenta en unos instantes.")
+                except Exception as ex:
+                    st.error(f"Fallo en la consulta: {ex}")
         else:
             # Fallback en modo offline para demostración/defensa
             if ticker_test == "SPX":
@@ -533,70 +1024,384 @@ tabs = st.tabs(["Dashboard", "Acciones", "Opciones", "Control Room"])
 with tabs[0]:
     st.header("Consola Principal del Bróker")
     
-    # 1. Indicadores Financieros
-    if conectado:
-        now = time.time()
-        last_summary_fetch = st.session_state.get('last_summary_fetch_time', 0)
-        if st.session_state.get('datos_cuenta') is None or (now - last_summary_fetch) >= 14:
-            with st.spinner("Sincronizando cuenta con IBKR..."):
-                st.session_state['datos_cuenta'] = st.session_state.broker.obtener_resumen_cuenta()
-                st.session_state['last_summary_fetch_time'] = now
-        datos_cuenta = st.session_state.get('datos_cuenta')
-        if datos_cuenta:
-            net_liq = float(datos_cuenta['NetLiquidation'])
-            buying_power = float(datos_cuenta['BuyingPower'])
-            daily_pnl = float(datos_cuenta['DailyPnL'])
+    @st.fragment(run_every=10)
+    def render_dashboard_completo():
+        # 1. Obtener datos financieros (Net Liquidation y Buying Power)
+        if conectado:
+            now = time.time()
+            last_summary_fetch = st.session_state.get('last_summary_fetch_time', 0)
+            if st.session_state.get('datos_cuenta') is None or (now - last_summary_fetch) >= 14:
+                with st.spinner("Sincronizando cuenta con IBKR..."):
+                    st.session_state['datos_cuenta'] = st.session_state.broker.obtener_resumen_cuenta()
+                    st.session_state['last_summary_fetch_time'] = now
+            datos_cuenta = st.session_state.get('datos_cuenta')
+            if datos_cuenta:
+                net_liq = float(datos_cuenta['NetLiquidation'])
+                buying_power = float(datos_cuenta['BuyingPower'])
+                daily_pnl = float(datos_cuenta['DailyPnL'])
+            else:
+                net_liq, buying_power, daily_pnl = 1000000.0, 5000000.0, 0.0
         else:
-            net_liq, buying_power, daily_pnl = 100000.0, 50000.0, 0.0
-    else:
-        # Mocks para defensa TFG si no hay gateway conectado
-        net_liq, buying_power, daily_pnl = 152430.80, 78920.40, 3250.00
-        st.info("💡 Bróker desconectado. Visualizando datos simulados (Modo Demostración TFG).")
-        
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Net Liquidation", f"${net_liq:,.2f}", delta=f"{'+' if daily_pnl >= 0 else ''}${daily_pnl:,.2f} Hoy")
-    c2.metric("Buying Power", f"${buying_power:,.2f}")
-    c3.metric("Daily P&L (No Realizado)", f"${daily_pnl:,.2f}", delta=f"{'+' if daily_pnl >= 0 else ''}{daily_pnl/net_liq*100:.2f}%", delta_color="normal")
-    
-    st.divider()
-    
-    # 2. Posiciones Abiertas
-    st.subheader("Posiciones Abiertas en Cartera")
-    st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Monitoreo directo del portafolio actual del bróker.</p>", unsafe_allow_html=True)
-    
-    @st.fragment(run_every=15)
-    def render_posiciones_cartera():
-        col_ref, _ = st.columns([1, 4])
-        actualizar = col_ref.button("🔄 Actualizar Cartera", key="btn_act_pos")
-        
+            # Mocks realistas para simulación/defensa (basados en las capturas del usuario)
+            net_liq, buying_power, daily_pnl = 1004910.68, 6670487.46, 0.0
+            
+        # 2. Sincronizar posiciones
         now = time.time()
         last_fetch = st.session_state.get('last_portfolio_fetch_time', 0)
         
         if conectado:
-            if actualizar or st.session_state.get('posiciones_cartera') is None or (now - last_fetch) >= 14:
+            if st.session_state.get('posiciones_cartera') is None or (now - last_fetch) >= 14:
                 st.session_state['posiciones_cartera'] = st.session_state.broker.obtener_posiciones_cartera()
                 st.session_state['last_portfolio_fetch_time'] = now
         else:
-            if actualizar or st.session_state.get('posiciones_cartera') is None:
+            if st.session_state.get('posiciones_cartera') is None:
+                # Mock que se alinea con la captura enviada por el usuario
                 st.session_state['posiciones_cartera'] = [
-                    {"Símbolo": "AAPL", "Tipo": "Acción", "Vencimiento": "—", "Strike": "—", "Right (C/P)": "—", "Posición": 100, "Precio Medio": 175.50, "Valor Mercado": 18120.00, "P&L No Real.": 570.00},
-                    {"Símbolo": "SPY", "Tipo": "Opción", "Vencimiento": "2026-06-19", "Strike": 510.0, "Right (C/P)": "C", "Posición": -2, "Precio Medio": 4.20, "Valor Mercado": -940.00, "P&L No Real.": -100.00},
-                    {"Símbolo": "MSFT", "Tipo": "Acción", "Vencimiento": "—", "Strike": "—", "Right (C/P)": "—", "Posición": 50, "Precio Medio": 405.00, "Valor Mercado": 20450.00, "P&L No Real.": 200.00}
+                    {"Símbolo": "AAPL", "Tipo": "STK", "Vencimiento": "—", "Strike": "—", "Right (C/P)": "—", "Posición": 51, "Precio Medio": 307.3475, "Valor Mercado": 14927.19, "P&L No Real.": -747.53},
+                    {"Símbolo": "BBVA", "Tipo": "STK", "Vencimiento": "—", "Strike": "—", "Right (C/P)": "—", "Posición": 1, "Precio Medio": 23.81, "Valor Mercado": 19.42, "P&L No Real.": -4.39},
+                    {"Símbolo": "BBVA", "Tipo": "STK", "Vencimiento": "—", "Strike": "—", "Right (C/P)": "—", "Posición": 1, "Precio Medio": 24.3309, "Valor Mercado": 22.39, "P&L No Real.": -1.94},
+                    {"Símbolo": "SPX", "Tipo": "Opción", "Vencimiento": "20260611", "Strike": 7220.0, "Right (C/P)": "P", "Posición": 1, "Precio Medio": 11.6164, "Valor Mercado": 620.0, "P&L No Real.": -541.64},
+                    {"Símbolo": "SPX", "Tipo": "Opción", "Vencimiento": "20260611", "Strike": 7230.0, "Right (C/P)": "P", "Posición": 1, "Precio Medio": 12.9164, "Valor Mercado": 740.0, "P&L No Real.": -551.64},
+                    {"Símbolo": "SPX", "Tipo": "Opción", "Vencimiento": "20260611", "Strike": 7240.0, "Right (C/P)": "P", "Posición": -1, "Precio Medio": 15.2836, "Valor Mercado": -860.0, "P&L No Real.": 668.36}
                 ]
                 
         posiciones = st.session_state.get('posiciones_cartera', [])
         
+        # 3. Cálculos de Portfolio
+        total_mkt_val = sum(pos.get('Valor Mercado', 0.0) for pos in posiciones)
+        total_invertido = sum(pos.get('Valor Mercado', 0.0) - pos.get('P&L No Real.', 0.0) for pos in posiciones)
+        efectivo = net_liq - total_mkt_val
+        
+        # Beneficios contra inversión inicial de 1,000,000
+        inversion_inicial = 1000000.0
+        beneficio_total = net_liq - inversion_inicial
+        rentabilidad_total = (beneficio_total / inversion_inicial) * 100
+        
+        pnl_color_tot = "#10b981" if beneficio_total >= 0 else "#ef4444"
+        pnl_sign_tot = "+" if beneficio_total >= 0 else ""
+        
+        # 4. Renderizar Resumen de Cartera (Estilo MyInvestor)
+        st.markdown(f"""
+        <div class="portfolio-summary-card">
+            <div style="font-size: 0.95rem; color: #94a3b8; margin-bottom: 5px;">Valor de mercado</div>
+            <div style="display: flex; align-items: baseline; gap: 20px; flex-wrap: wrap;">
+                <span style="font-size: 2.8rem; font-weight: 800; color: #6366f1; line-height: 1.1;">
+                    ${net_liq:,.2f}
+                </span>
+                <span style="font-size: 1.25rem; font-weight: 700; color: {pnl_color_tot};">
+                    {pnl_sign_tot}${beneficio_total:,.2f} &nbsp;|&nbsp; {pnl_sign_tot}{rentabilidad_total:.2f}%
+                </span>
+            </div>
+            <div style="border-top: 1px solid rgba(255,255,255,0.06); margin-top: 18px; padding-top: 15px; display: flex; gap: 60px; flex-wrap: wrap;">
+                <div>
+                    <div style="font-size: 0.85rem; color: #94a3b8;">Invertido</div>
+                    <div style="font-size: 1.25rem; font-weight: 700; color: #ffffff; margin-top: 2px;">${total_invertido:,.2f}</div>
+                </div>
+                <div>
+                    <div style="font-size: 0.85rem; color: #94a3b8;">Efectivo</div>
+                    <div style="font-size: 1.25rem; font-weight: 700; color: #ffffff; margin-top: 2px;">${efectivo:,.2f}</div>
+                </div>
+                <div>
+                    <div style="font-size: 0.85rem; color: #94a3b8;">Buying Power (Margen)</div>
+                    <div style="font-size: 1.25rem; font-weight: 700; color: #94a3b8; margin-top: 2px;">${buying_power:,.2f}</div>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # 5. Gráficas Interactivas (Evolución y Distribución de Fondos)
+        import numpy as np
+        import datetime as dt_mod
+        
+        # A. Evolución Temporal del NLV (Área suavizada)
+        np.random.seed(42)
+        dates_nlv = [dt_mod.date.today() - dt_mod.timedelta(days=i) for i in range(30)]
+        dates_nlv.reverse()
+        
+        # Generamos un camino aleatorio coherente terminado exactamente en el nlv actual
+        steps_nlv = np.random.normal(loc=1200, scale=8000, size=30)
+        steps_nlv = steps_nlv + 500  # Tendencia alcista mockeada
+        values_nlv = []
+        current_nlv = net_liq
+        for step in reversed(steps_nlv):
+            values_nlv.append(current_nlv)
+            current_nlv -= step
+        values_nlv.reverse()
+        
+        fig_nlv = go.Figure()
+        fig_nlv.add_trace(go.Scatter(
+            x=dates_nlv,
+            y=values_nlv,
+            mode='lines',
+            line=dict(color='#6366f1', width=3, shape='spline'),
+            fill='tozeroy',
+            fillcolor='rgba(99, 102, 241, 0.06)',
+            name='Net Liquidation Value',
+            hovertemplate='<b>Fecha</b>: %{x}<br><b>NLV</b>: $%{y:,.2f}<extra></extra>'
+        ))
+        
+        capital_depositado = 1000000.0
+        fig_nlv.add_trace(go.Scatter(
+            x=dates_nlv,
+            y=[capital_depositado]*30,
+            mode='lines',
+            line=dict(color='rgba(255, 255, 255, 0.25)', width=1, dash='dash'),
+            name='Capital Depositado',
+            hovertemplate='Capital Depositado: $1,000,000.00<extra></extra>'
+        ))
+        
+        fig_nlv.update_layout(
+            title=dict(
+                text="<b>Evolución Temporal del Valor Liquidativo (NLV)</b>",
+                font=dict(size=14, color='#ffffff')
+            ),
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#94a3b8', family='Outfit, Inter, sans-serif'),
+            margin=dict(t=50, b=15, l=40, r=20),
+            height=300,
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1,
+                font=dict(size=10)
+            ),
+            xaxis=dict(
+                showgrid=True,
+                gridcolor='rgba(255,255,255,0.03)',
+                zeroline=False,
+                rangeselector=dict(
+                    buttons=list([
+                        dict(count=7, label="1W", step="day", stepmode="backward"),
+                        dict(count=15, label="15D", step="day", stepmode="backward"),
+                        dict(count=30, label="1M", step="day", stepmode="backward"),
+                        dict(step="all", label="ALL")
+                    ]),
+                    bgcolor="rgba(30, 41, 59, 0.6)",
+                    activecolor="rgba(99, 102, 241, 0.4)",
+                    font=dict(color="#ffffff", size=10)
+                )
+            ),
+            yaxis=dict(
+                showgrid=True,
+                gridcolor='rgba(255,255,255,0.03)',
+                zeroline=False,
+                tickformat="$,.0f"
+            )
+        )
+        
+        # B. Distribución de Activos (Dónut)
+        total_stocks = sum(abs(pos.get('Valor Mercado', 0.0)) for pos in posiciones if pos.get('Tipo') in ('Acción', 'STK', 'Stock', 'IND'))
+        total_options = sum(abs(pos.get('Valor Mercado', 0.0)) for pos in posiciones if pos.get('Tipo') in ('Opción', 'OPT', 'Option'))
+        cash_val = max(0.0, efectivo)
+        
         if not posiciones:
-            st.success("✅ Sin posiciones abiertas en la cuenta. La cartera está 100% en efectivo.")
-        else:
-            df_pos = pd.DataFrame(posiciones)
-            # Evitamos que PyArrow falle por tipos mixtos (ej. Strike con '—' y float)
-            for col in ["Strike", "Vencimiento", "Right (C/P)"]:
-                if col in df_pos.columns:
-                    df_pos[col] = df_pos[col].map(lambda x: "—" if (x is None or pd.isna(x) or str(x).strip() == "" or x == "—") else str(x))
-            st.dataframe(df_pos, width="stretch", hide_index=True)
+            total_stocks = 350000.0
+            total_options = 120000.0
+            cash_val = 530000.0
             
-    render_posiciones_cartera()
+        labels_alloc = ['Efectivo', 'Acciones', 'Opciones']
+        values_alloc = [cash_val, total_stocks, total_options]
+        colors_alloc = ['#6366f1', '#10b981', '#8b5cf6']
+        
+        fig_alloc = go.Figure(data=[go.Pie(
+            labels=labels_alloc,
+            values=values_alloc,
+            hole=0.45,
+            marker=dict(colors=colors_alloc, line=dict(color='rgba(13,14,21,0.8)', width=2)),
+            textinfo='percent',
+            textposition='inside',
+            insidetextorientation='horizontal',
+            hovertemplate='<b>%{label}</b><br>Valor: $%{value:,.2f}<br>Porcentaje: %{percent}<extra></extra>'
+        )])
+        
+        fig_alloc.update_layout(
+            title=dict(
+                text="<b>Distribución de Activos (Allocation)</b>",
+                font=dict(size=13, color='#ffffff')
+            ),
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#94a3b8', family='Outfit, Inter, sans-serif'),
+            margin=dict(t=50, b=15, l=15, r=15),
+            height=280,
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=-0.15,
+                xanchor="center",
+                x=0.5,
+                font=dict(size=10)
+            )
+        )
+        
+        # C. Diversificación por Subyacente (Barras Horizontales)
+        ticker_exposure = {}
+        for pos in posiciones:
+            sym = pos.get('Símbolo')
+            val = abs(pos.get('Valor Mercado', 0.0))
+            ticker_exposure[sym] = ticker_exposure.get(sym, 0.0) + val
+            
+        if not ticker_exposure:
+            ticker_exposure = {
+                "AAPL": 14927.19,
+                "SPX": 2220.00,
+                "BBVA": 41.81,
+                "TSLA": 8500.00,
+                "NVDA": 12400.00
+            }
+            
+        sorted_exposure = sorted(ticker_exposure.items(), key=lambda x: x[1])
+        tickers_list = [item[0] for item in sorted_exposure]
+        values_exposure = [item[1] for item in sorted_exposure]
+        
+        total_exp = sum(values_exposure)
+        pct_exposure = [(val / total_exp * 100) if total_exp > 0 else 0.0 for val in values_exposure]
+        
+        fig_div = go.Figure(go.Bar(
+            x=values_exposure,
+            y=tickers_list,
+            orientation='h',
+            marker=dict(
+                color=values_exposure,
+                colorscale=[[0, '#312e81'], [0.5, '#4f46e5'], [1.0, '#6366f1']],
+                line=dict(color='rgba(99, 102, 241, 0.25)', width=1)
+            ),
+            hovertemplate='<b>Ticker</b>: %{y}<br><b>Valor</b>: $%{x:,.2f}<br><b>Peso</b>: %{customdata:.2f}%<extra></extra>',
+            customdata=pct_exposure
+        ))
+        
+        fig_div.update_layout(
+            title=dict(
+                text="<b>Diversificación por Subyacente</b>",
+                font=dict(size=13, color='#ffffff')
+            ),
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#94a3b8', family='Outfit, Inter, sans-serif'),
+            margin=dict(t=50, b=15, l=50, r=20),
+            height=280,
+            xaxis=dict(
+                showgrid=True,
+                gridcolor='rgba(255,255,255,0.03)',
+                zeroline=False,
+                tickformat="$,.0f"
+            ),
+            yaxis=dict(
+                showgrid=False,
+                zeroline=False
+            )
+        )
+        
+        # Renderizado en rejilla
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+        with st.container(key="chart_nlv_container"):
+            st.plotly_chart(fig_nlv, use_container_width=True, config={'displayModeBar': False})
+            
+        col_alloc, col_div = st.columns(2)
+        with col_alloc:
+            with st.container(key="chart_alloc_container"):
+                st.plotly_chart(fig_alloc, use_container_width=True, config={'displayModeBar': False})
+        with col_div:
+            with st.container(key="chart_div_container"):
+                st.plotly_chart(fig_div, use_container_width=True, config={'displayModeBar': False})
+        
+        st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
+        
+        # 6. Renderizar Activos Diferenciados (Acciones / Opciones)
+        raw_acciones = [p for p in posiciones if p.get('Tipo') in ('Acción', 'STK', 'Stock', 'IND')]
+        acciones_agrupadas = {}
+        for p in raw_acciones:
+            sym = p.get('Símbolo')
+            qty = p.get('Posición', 0.0)
+            avg_p = p.get('Precio Medio', 0.0)
+            mkt_val = p.get('Valor Mercado', 0.0)
+            pnl = p.get('P&L No Real.', 0.0)
+            
+            if sym not in acciones_agrupadas:
+                acciones_agrupadas[sym] = {
+                    "Símbolo": sym,
+                    "Tipo": p.get("Tipo"),
+                    "Posición": 0.0,
+                    "Valor Mercado": 0.0,
+                    "P&L No Real.": 0.0,
+                    "Costo Total": 0.0
+                }
+            acciones_agrupadas[sym]["Posición"] += qty
+            acciones_agrupadas[sym]["Valor Mercado"] += mkt_val
+            acciones_agrupadas[sym]["P&L No Real."] += pnl
+            acciones_agrupadas[sym]["Costo Total"] += avg_p * qty
+            
+        for sym, data in acciones_agrupadas.items():
+            if data["Posición"] != 0:
+                data["Precio Medio"] = round(data["Costo Total"] / data["Posición"], 4)
+            else:
+                data["Precio Medio"] = 0.0
+            data.pop("Costo Total", None)
+            
+        acciones_list = list(acciones_agrupadas.values())
+        
+        opciones_list = [p for p in posiciones if p.get('Tipo') in ('Opción', 'OPT', 'Option')]
+        
+        def render_seccion_activos(titulo, lista_activos):
+            st.subheader(titulo)
+            if not lista_activos:
+                st.info(f"Sin posiciones activas en la categoría de {titulo.lower()}.")
+                return
+            
+            with st.container(key=f"asset_list_container_{titulo}"):
+                for idx, pos in enumerate(lista_activos):
+                    simbolo = pos.get('Símbolo')
+                    mkt_val = pos.get('Valor Mercado', 0.0)
+                    pnl = pos.get('P&L No Real.', 0.0)
+                    
+                    cost = mkt_val - pnl
+                    rent = (pnl / abs(cost) * 100) if cost != 0 else 0.0
+                    
+                    pnl_color = "#10b981" if pnl >= 0 else "#ef4444"
+                    pnl_sign = "+" if pnl >= 0 else ""
+                    
+                    detalles = ""
+                    if pos.get('Tipo') in ('Opción', 'OPT', 'Option'):
+                        strike = pos.get('Strike')
+                        right = pos.get('Right (C/P)', '')
+                        venc = pos.get('Vencimiento', '')
+                        detalles = f" ({venc} Strk {strike} {right})"
+                    
+                    safe_sym = simbolo.replace(" ", "_").replace("/", "_").replace("-", "_")
+                    with st.container(key=f"asset_row_{titulo}_{safe_sym}_{idx}"):
+                        c_info, c_vals, c_btn = st.columns([8.0, 2.2, 0.8], vertical_alignment="center")
+                        with c_info:
+                            st.markdown(
+                                f'<div style="display: flex; align-items: center; gap: 8px;">'
+                                f'<span style="font-weight: 600; color: #ffffff; font-size: 1.05rem;">{simbolo}{detalles}</span>'
+                                f'<span style="font-size: 0.75rem; background-color: rgba(99, 102, 241, 0.15); color: #818cf8; padding: 2px 6px; border-radius: 4px; font-weight: 600; text-transform: uppercase;">{pos.get("Tipo")}</span>'
+                                f'</div>',
+                                unsafe_allow_html=True
+                            )
+                        with c_vals:
+                            st.markdown(
+                                f'<div style="text-align: right;">'
+                                f'<div style="font-weight: 700; color: #ffffff; font-size: 1.1rem;">${mkt_val:,.2f}</div>'
+                                f'<div style="font-size: 0.85rem; font-weight: 600; color: {pnl_color}; margin-top: 2px;">'
+                                f'{pnl_sign}${pnl:,.2f} ({pnl_sign}{rent:.2f}%)'
+                                f'</div>'
+                                f'</div>',
+                                unsafe_allow_html=True
+                            )
+                        with c_btn:
+                            if st.button("🔍", key=f"btn_details_{titulo}_{safe_sym}_{idx}", use_container_width=True):
+                                mostrar_detalle_posicion(pos)
+            st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
+            
+        render_seccion_activos("Acciones", acciones_list)
+        render_seccion_activos("Opciones", opciones_list)
+        
+    render_dashboard_completo()
 
 
 with tabs[1]:
@@ -623,60 +1428,58 @@ with tabs[1]:
     st.subheader("Condiciones de Entrada Avanzadas")
     st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Activa las condiciones que deben cumplirse antes de que el Watchdog envíe la orden al mercado.</p>", unsafe_allow_html=True)
 
-    _W  = [1.5, 0.7, 1.1, 0.9]  # Anchos idénticos en todas las filas → columnas alineadas
-    _SP = "<div style='height:16px'></div>"  # Separación fija preestablecida
-
-    # Fila: Ventana Horaria
-    _c0, _c1, _c2, _c3 = st.columns(_W)
-    with _c0:
-        act_horario = st.toggle("Ventana Horaria", value=False, key="acc_act_horario")
-    if act_horario:
-        tipo_horario = _c1.selectbox("", ["Rango", "Hora Fija"], key="acc_tipo_horario", label_visibility="collapsed")
-        h_ini_acc    = _c2.text_input("", value="15:30", key="acc_h_ini", label_visibility="collapsed")
+    # Funciones de campos para tarjetas de entrada (Acciones)
+    def fields_acc_horario(disabled):
+        c1, c2, c3 = st.columns(3)
+        tipo_horario = c1.selectbox("Tipo", ["Rango", "Hora Fija"], key="acc_tipo_horario", disabled=disabled)
+        h_ini_val = c2.text_input("Hora Inicio", value="15:30", key="acc_h_ini", disabled=disabled)
         if tipo_horario == "Rango":
-            h_fin_acc = _c3.text_input("", value="22:00", key="acc_h_fin", label_visibility="collapsed")
+            h_fin_val = c3.text_input("Hora Fin", value="22:00", key="acc_h_fin", disabled=disabled)
         else:
             try:
                 from datetime import datetime, timedelta
-                h_fin_acc = (datetime.strptime(h_ini_acc, "%H:%M") + timedelta(minutes=10)).strftime("%H:%M")
+                h_fin_val = (datetime.strptime(h_ini_val, "%H:%M") + timedelta(minutes=10)).strftime("%H:%M")
             except Exception:
-                h_fin_acc = "23:59"
-    else:
-        h_ini_acc, h_fin_acc = "15:30", "22:00"
-    st.markdown(_SP, unsafe_allow_html=True)
+                h_fin_val = "23:59"
+            c3.text_input("Hora Fin (Auto)", value=h_fin_val, disabled=True, key="acc_h_fin_auto")
+        return h_ini_val, h_fin_val
 
-    # Fila: Filtro VIX
-    _c0, _c1, _c2, _c3 = st.columns(_W)
-    with _c0:
-        act_vix = st.toggle("Filtro VIX", value=False, key="acc_act_vix")
-    if act_vix:
-        vix_op_acc  = _c1.selectbox("", ["<", "<=", ">", ">="], key="acc_vix_op", label_visibility="collapsed")
-        vix_val_acc = _c2.number_input("", min_value=1.0, value=20.0, step=0.5, key="acc_vix_val", label_visibility="collapsed")
-    st.markdown(_SP, unsafe_allow_html=True)
+    def fields_acc_vix(disabled):
+        c1, c2 = st.columns(2)
+        vix_op_acc = c1.selectbox("Operador", ["<", "<=", ">", ">="], key="acc_vix_op", disabled=disabled)
+        vix_val_acc = c2.number_input("Valor VIX", min_value=1.0, value=20.0, step=0.5, key="acc_vix_val", disabled=disabled)
+        return vix_op_acc, vix_val_acc
 
-    # Fila: Filtro SMA
-    _c0, _c1, _c2, _c3 = st.columns(_W)
-    with _c0:
-        act_sma = st.toggle("Filtro SMA", value=False, key="acc_act_sma")
-    if act_sma:
-        sma_per_acc = _c1.number_input("", min_value=5, value=200, step=5, key="acc_sma_per", label_visibility="collapsed")
-        sma_reg_acc = _c2.selectbox("", ["Precio > SMA", "Precio < SMA"], key="acc_sma_reg", label_visibility="collapsed")
-    st.markdown(_SP, unsafe_allow_html=True)
+    def fields_acc_sma(disabled):
+        c1, c2 = st.columns(2)
+        sma_per_acc = c1.number_input("Periodo SMA", min_value=5, value=200, step=5, key="acc_sma_per", disabled=disabled)
+        sma_reg_acc = c2.selectbox("Regla", ["Precio > SMA", "Precio < SMA"], key="acc_sma_reg", disabled=disabled)
+        return sma_per_acc, sma_reg_acc
 
-    # Fila: Precio Disparador
-    _c0, _c1, _c2, _c3 = st.columns(_W)
-    with _c0:
-        act_precio = st.toggle("Precio Disparador", value=False, key="acc_act_precio")
-    if act_precio:
-        op_precio_acc  = _c1.selectbox("", ["<=", ">="], key="acc_precio_op", label_visibility="collapsed")
-        val_precio_acc = _c2.number_input("", min_value=0.0, value=150.0, step=0.5, key="acc_precio_val", label_visibility="collapsed")
-    st.markdown(_SP, unsafe_allow_html=True)
+    def fields_acc_precio(disabled):
+        c1, c2 = st.columns(2)
+        op_precio_acc = c1.selectbox("Operador", ["<=", ">="], key="acc_precio_op", disabled=disabled)
+        val_precio_acc = c2.number_input("Valor Precio ($)", min_value=0.0, value=150.0, step=0.5, key="acc_precio_val", disabled=disabled)
+        return op_precio_acc, val_precio_acc
 
-    # Fila: Frecuencia (siempre visible)
-    _c0, _c1, _c2, _c3 = st.columns(_W)
-    with _c0:
-        st.markdown("<p style='margin-top:8px; color:#94a3b8; font-size:0.88rem;'>Frecuencia</p>", unsafe_allow_html=True)
-    frec_acc = _c1.selectbox("", ["Única", "Diaria", "Semanal"], key="acc_frecuencia", label_visibility="collapsed")
+    # Renderizado de Entrada (Acciones) en Grid 2x2
+    col1, col2 = st.columns(2)
+    with col1:
+        act_horario, vals_horario = render_watchdog_card("Ventana Horaria", "acc_act_horario", fields_acc_horario)
+        h_ini_acc, h_fin_acc = vals_horario if vals_horario else ("15:30", "22:00")
+        
+        act_sma, vals_sma = render_watchdog_card("Filtro SMA", "acc_act_sma", fields_acc_sma)
+        sma_per_acc, sma_reg_acc = vals_sma if vals_sma else (200, "Precio > SMA")
+        
+    with col2:
+        act_vix, vals_vix = render_watchdog_card("Filtro VIX", "acc_act_vix", fields_acc_vix)
+        vix_op_acc, vix_val_acc = vals_vix if vals_vix else ("<", 20.0)
+        
+        act_precio, vals_precio = render_watchdog_card("Precio Disparador", "acc_act_precio", fields_acc_precio)
+        op_precio_acc, val_precio_acc = vals_precio if vals_precio else ("<=", 150.0)
+
+    # Frecuencia (siempre visible debajo del grid)
+    frec_acc = st.selectbox("Frecuencia de Ejecución", ["Única", "Diaria", "Semanal"], key="acc_frecuencia")
             
     st.divider()
     
@@ -684,42 +1487,45 @@ with tabs[1]:
     st.subheader("Condiciones de Salida Avanzadas")
     st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Activa y configura las reglas de gestión de riesgo que vigilará el Watchdog de Salidas.</p>", unsafe_allow_html=True)
 
-    _W  = [1.5, 0.7, 1.1, 0.9]
-    _SP = "<div style='height:16px'></div>"
+    # Funciones de campos para tarjetas de salida (Acciones)
+    def fields_acc_sl_tp(disabled):
+        c1, c2, c3 = st.columns(3)
+        stop_loss_acc = c1.number_input("Stop Loss ($)", value=-200.0, step=10.0, key="acc_sl_val", disabled=disabled)
+        take_profit_acc = c2.number_input("Take Profit ($)", value=400.0, step=10.0, key="acc_tp_val", disabled=disabled)
+        dest_gestion = c3.selectbox("Gestión", ["App (Watchdog)", "IBKR (Broker)"], key="acc_gestion_sl_tp", disabled=disabled)
+        return stop_loss_acc, take_profit_acc, dest_gestion
 
-    # Fila: Stop Loss / Take Profit
-    _c0, _c1, _c2, _c3 = st.columns(_W)
-    with _c0:
-        act_sl_tp = st.toggle("Stop Loss / Take Profit", value=False, key="acc_act_sl_tp")
-    if act_sl_tp:
-        stop_loss_acc   = _c1.number_input("", value=-200.0, step=10.0, key="acc_sl_val", label_visibility="collapsed")
-        take_profit_acc = _c2.number_input("", value=400.0, step=10.0, key="acc_tp_val", label_visibility="collapsed")
-        dest_gestion    = _c3.selectbox("", ["App (Watchdog)", "IBKR (Broker)"], key="acc_gestion_sl_tp", label_visibility="collapsed")
-    st.markdown(_SP, unsafe_allow_html=True)
+    def fields_acc_vix_salida(disabled):
+        vix_max_acc = st.number_input("VIX Máximo", min_value=1.0, value=30.0, step=0.5, key="acc_vix_max", disabled=disabled)
+        return vix_max_acc
 
-    # Fila: Cerrar por VIX
-    _c0, _c1, _c2, _c3 = st.columns(_W)
-    with _c0:
-        act_vix_salida = st.toggle("Cerrar por VIX", value=False, key="acc_act_vix_salida")
-    if act_vix_salida:
-        vix_max_acc = _c1.number_input("", min_value=1.0, value=30.0, step=0.5, key="acc_vix_max", label_visibility="collapsed")
-    st.markdown(_SP, unsafe_allow_html=True)
+    def fields_acc_sma_salida(disabled):
+        c1, c2 = st.columns(2)
+        sma_per_sal = c1.number_input("Periodo SMA", min_value=5, value=200, step=5, key="acc_sma_per_sal", disabled=disabled)
+        sma_reg_sal = c2.selectbox("Regla", ["Precio < SMA", "Precio > SMA"], key="acc_sma_reg_sal", disabled=disabled)
+        return sma_per_sal, sma_reg_sal
 
-    # Fila: Cerrar por SMA
-    _c0, _c1, _c2, _c3 = st.columns(_W)
-    with _c0:
-        act_sma_salida = st.toggle("Cerrar por SMA", value=False, key="acc_act_sma_salida")
-    if act_sma_salida:
-        sma_per_sal = _c1.number_input("", min_value=5, value=200, step=5, key="acc_sma_per_sal", label_visibility="collapsed")
-        sma_reg_sal = _c2.selectbox("", ["Precio < SMA", "Precio > SMA"], key="acc_sma_reg_sal", label_visibility="collapsed")
-    st.markdown(_SP, unsafe_allow_html=True)
+    def fields_acc_hora_salida(disabled):
+        hora_sal_acc = st.text_input("Hora Cierre", value="21:45", key="acc_hora_sal", disabled=disabled)
+        return hora_sal_acc
 
-    # Fila: Hora Forzada
-    _c0, _c1, _c2, _c3 = st.columns(_W)
-    with _c0:
-        act_hora_salida = st.toggle("Hora Forzada", value=False, key="acc_act_hora_salida")
-    if act_hora_salida:
-        hora_sal_acc = _c1.text_input("", value="21:45", key="acc_hora_sal", label_visibility="collapsed")
+    # Renderizado de Salida (Acciones) en Grid 2x2
+    col1, col2 = st.columns(2)
+    with col1:
+        act_sl_tp, vals_sl_tp = render_watchdog_card("Stop Loss / Take Profit", "acc_act_sl_tp", fields_acc_sl_tp)
+        stop_loss_acc, take_profit_acc, dest_gestion = vals_sl_tp if vals_sl_tp else (-200.0, 400.0, "App (Watchdog)")
+        
+        act_sma_salida, vals_sma_salida = render_watchdog_card("Cerrar por SMA", "acc_act_sma_salida", fields_acc_sma_salida)
+        sma_per_sal, sma_reg_sal = vals_sma_salida if vals_sma_salida else (200, "Precio < SMA")
+        
+    with col2:
+        act_vix_salida, vix_max_acc = render_watchdog_card("Cerrar por VIX", "acc_act_vix_salida", fields_acc_vix_salida)
+        if vix_max_acc is None:
+            vix_max_acc = 30.0
+            
+        act_hora_salida, hora_sal_acc = render_watchdog_card("Hora Forzada", "acc_act_hora_salida", fields_acc_hora_salida)
+        if hora_sal_acc is None:
+            hora_sal_acc = "21:45"
             
     st.markdown("<br>", unsafe_allow_html=True)
     submit_acc = st.button("Encolar Estrategia Acciones", width="stretch", key="btn_encolar_acciones")
@@ -1228,104 +2034,105 @@ with tabs[2]:
         st.subheader("Condiciones de Entrada Avanzadas")
         st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Activa las condiciones que deben cumplirse antes de que el Watchdog envíe la orden al mercado.</p>", unsafe_allow_html=True)
 
-        _W  = [1.5, 0.7, 1.1, 0.9]
-        _SP = "<div style='height:16px'></div>"
-
-        # Fila: Ventana Horaria
-        _c0, _c1, _c2, _c3 = st.columns(_W)
-        with _c0:
-            opt_act_horario = st.toggle("Ventana Horaria", value=False, key="opt_act_horario")
-        if opt_act_horario:
-            opt_tipo_horario = _c1.selectbox("", ["Rango", "Hora Fija"], key="opt_tipo_horario", label_visibility="collapsed")
-            o_h_ini          = _c2.text_input("", value="15:45", key="opt_h_ini", label_visibility="collapsed")
+        # Funciones de campos para tarjetas de entrada (Opciones)
+        def fields_opt_horario(disabled):
+            c1, c2, c3 = st.columns(3)
+            opt_tipo_horario = c1.selectbox("Tipo", ["Rango", "Hora Fija"], key="opt_tipo_horario", disabled=disabled)
+            o_h_ini = c2.text_input("Hora Inicio", value="15:45", key="opt_h_ini", disabled=disabled)
             if opt_tipo_horario == "Rango":
-                o_h_fin = _c3.text_input("", value="21:30", key="opt_h_fin", label_visibility="collapsed")
+                o_h_fin = c3.text_input("Hora Fin", value="21:30", key="opt_h_fin", disabled=disabled)
             else:
                 try:
-                    from datetime import timedelta
+                    from datetime import datetime, timedelta
                     o_h_fin = (datetime.strptime(o_h_ini, "%H:%M") + timedelta(minutes=10)).strftime("%H:%M")
                 except Exception:
                     o_h_fin = "23:59"
-        else:
-            o_h_ini, o_h_fin = "15:45", "21:30"
-        st.markdown(_SP, unsafe_allow_html=True)
+                c3.text_input("Hora Fin (Auto)", value=o_h_fin, disabled=True, key="opt_h_fin_auto")
+            return o_h_ini, o_h_fin
 
-        # Fila: Filtro VIX
-        _c0, _c1, _c2, _c3 = st.columns(_W)
-        with _c0:
-            opt_act_vix = st.toggle("Filtro VIX", value=False, key="opt_act_vix")
-        if opt_act_vix:
-            opt_vix_op  = _c1.selectbox("", ["<", "<=", ">", ">="], key="opt_vix_op", label_visibility="collapsed")
-            opt_vix_val = _c2.number_input("", min_value=1.0, value=20.0, step=0.5, key="opt_vix_val", label_visibility="collapsed")
-        st.markdown(_SP, unsafe_allow_html=True)
+        def fields_opt_vix(disabled):
+            c1, c2 = st.columns(2)
+            opt_vix_op = c1.selectbox("Operador", ["<", "<=", ">", ">="], key="opt_vix_op", disabled=disabled)
+            opt_vix_val = c2.number_input("Valor VIX", min_value=1.0, value=20.0, step=0.5, key="opt_vix_val", disabled=disabled)
+            return opt_vix_op, opt_vix_val
 
-        # Fila: Filtro SMA
-        _c0, _c1, _c2, _c3 = st.columns(_W)
-        with _c0:
-            opt_act_sma = st.toggle("Filtro SMA", value=False, key="opt_act_sma")
-        if opt_act_sma:
-            opt_sma_per = _c1.number_input("", min_value=5, value=200, step=5, key="opt_sma_per", label_visibility="collapsed")
-            opt_sma_reg = _c2.selectbox("", ["Precio > SMA", "Precio < SMA"], key="opt_sma_reg", label_visibility="collapsed")
-        st.markdown(_SP, unsafe_allow_html=True)
+        def fields_opt_sma(disabled):
+            c1, c2 = st.columns(2)
+            opt_sma_per = c1.number_input("Periodo SMA", min_value=5, value=200, step=5, key="opt_sma_per", disabled=disabled)
+            opt_sma_reg = c2.selectbox("Regla", ["Precio > SMA", "Precio < SMA"], key="opt_sma_reg", disabled=disabled)
+            return opt_sma_per, opt_sma_reg
 
-        # Fila: Precio Disparador
-        _c0, _c1, _c2, _c3 = st.columns(_W)
-        with _c0:
-            opt_act_precio = st.toggle("Precio Disparador", value=False, key="opt_act_precio")
-        if opt_act_precio:
-            opt_precio_op  = _c1.selectbox("", ["<=", ">="], key="opt_precio_op", label_visibility="collapsed")
-            opt_precio_val = _c2.number_input("", min_value=0.0, value=100.0, step=0.5, key="opt_precio_val", label_visibility="collapsed")
-        st.markdown(_SP, unsafe_allow_html=True)
+        def fields_opt_precio(disabled):
+            c1, c2 = st.columns(2)
+            opt_precio_op = c1.selectbox("Operador", ["<=", ">="], key="opt_precio_op", disabled=disabled)
+            opt_precio_val = c2.number_input("Valor Precio ($)", min_value=0.0, value=100.0, step=0.5, key="opt_precio_val", disabled=disabled)
+            return opt_precio_op, opt_precio_val
 
-        # Fila: Frecuencia (siempre visible)
-        _c0, _c1, _c2, _c3 = st.columns(_W)
-        with _c0:
-            st.markdown("<p style='margin-top:8px; color:#94a3b8; font-size:0.88rem;'>Frecuencia</p>", unsafe_allow_html=True)
-        opt_frecuencia = _c1.selectbox("", ["Única", "Diaria", "Semanal"], key="opt_frecuencia", label_visibility="collapsed")
+        # Renderizado de Entrada (Opciones) en Grid 2x2
+        col1, col2 = st.columns(2)
+        with col1:
+            opt_act_horario, vals_opt_horario = render_watchdog_card("Ventana Horaria", "opt_act_horario", fields_opt_horario)
+            o_h_ini, o_h_fin = vals_opt_horario if vals_opt_horario else ("15:45", "21:30")
+            
+            opt_act_sma, vals_opt_sma = render_watchdog_card("Filtro SMA", "opt_act_sma", fields_opt_sma)
+            opt_sma_per, opt_sma_reg = vals_opt_sma if vals_opt_sma else (200, "Precio > SMA")
+            
+        with col2:
+            opt_act_vix, vals_opt_vix = render_watchdog_card("Filtro VIX", "opt_act_vix", fields_opt_vix)
+            opt_vix_op, opt_vix_val = vals_opt_vix if vals_opt_vix else ("<", 20.0)
+            
+            opt_act_precio, vals_opt_precio = render_watchdog_card("Precio Disparador", "opt_act_precio", fields_opt_precio)
+            opt_precio_op, opt_precio_val = vals_opt_precio if vals_opt_precio else ("<=", 100.0)
 
+        # Frecuencia (siempre visible debajo del grid)
+        opt_frecuencia = st.selectbox("Frecuencia de Ejecución", ["Única", "Diaria", "Semanal"], key="opt_frecuencia")
+                
         st.divider()
 
         # ── CONDICIONES DE SALIDA ───────────────────────────────────────────
         st.subheader("Condiciones de Salida Avanzadas")
         st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Activa y configura las reglas de gestión de riesgo que vigilará el Watchdog de Salidas.</p>", unsafe_allow_html=True)
 
-        _W  = [1.5, 0.7, 1.1, 0.9]
-        _SP = "<div style='height:16px'></div>"
+        # Funciones de campos para tarjetas de salida (Opciones)
+        def fields_opt_sl_tp(disabled):
+            c1, c2, c3 = st.columns(3)
+            opt_stop_loss = c1.number_input("Stop Loss ($)", value=-300.0, step=10.0, key="opt_sl_val", disabled=disabled)
+            opt_take_profit = c2.number_input("Take Profit ($)", value=600.0, step=10.0, key="opt_tp_val", disabled=disabled)
+            opt_dest_gestion = c3.selectbox("Gestión", ["App (Watchdog)", "IBKR (Broker)"], key="opt_dest_gestion", disabled=disabled)
+            return opt_stop_loss, opt_take_profit, opt_dest_gestion
 
-        # Fila: Stop Loss / Take Profit
-        _c0, _c1, _c2, _c3 = st.columns(_W)
-        with _c0:
-            opt_act_sl_tp = st.toggle("Stop Loss / Take Profit", value=False, key="opt_act_sl_tp")
-        if opt_act_sl_tp:
-            opt_stop_loss   = _c1.number_input("", value=-300.0, step=10.0, key="opt_sl_val", label_visibility="collapsed")
-            opt_take_profit = _c2.number_input("", value=600.0, step=10.0, key="opt_tp_val", label_visibility="collapsed")
-            opt_dest_gestion = _c3.selectbox("", ["App (Watchdog)", "IBKR (Broker)"], key="opt_dest_gestion", label_visibility="collapsed")
-        st.markdown(_SP, unsafe_allow_html=True)
+        def fields_opt_vix_sal(disabled):
+            opt_vix_max = st.number_input("VIX Máximo", min_value=1.0, value=28.0, step=0.5, key="opt_vix_max", disabled=disabled)
+            return opt_vix_max
 
-        # Fila: Cerrar por VIX
-        _c0, _c1, _c2, _c3 = st.columns(_W)
-        with _c0:
-            opt_act_vix_sal = st.toggle("Cerrar por VIX", value=False, key="opt_act_vix_sal")
-        if opt_act_vix_sal:
-            opt_vix_max = _c1.number_input("", min_value=1.0, value=28.0, step=0.5, key="opt_vix_max", label_visibility="collapsed")
-        st.markdown(_SP, unsafe_allow_html=True)
+        def fields_opt_sma_sal(disabled):
+            c1, c2 = st.columns(2)
+            opt_sma_per_sal = c1.number_input("Periodo SMA", min_value=5, value=200, step=5, key="opt_sma_per_sal", disabled=disabled)
+            opt_sma_reg_sal = c2.selectbox("Regla", ["Precio < SMA", "Precio > SMA"], key="opt_sma_reg_sal", disabled=disabled)
+            return opt_sma_per_sal, opt_sma_reg_sal
 
-        # Fila: Cerrar por SMA
-        _c0, _c1, _c2, _c3 = st.columns(_W)
-        with _c0:
-            opt_act_sma_sal = st.toggle("Cerrar por SMA", value=False, key="opt_act_sma_sal")
-        if opt_act_sma_sal:
-            opt_sma_per_sal = _c1.number_input("", min_value=5, value=200, step=5, key="opt_sma_per_sal", label_visibility="collapsed")
-            opt_sma_reg_sal = _c2.selectbox("", ["Precio < SMA", "Precio > SMA"], key="opt_sma_reg_sal", label_visibility="collapsed")
-        st.markdown(_SP, unsafe_allow_html=True)
+        def fields_opt_hora_sal(disabled):
+            opt_hora_sal = st.text_input("Hora Cierre", value="21:45", key="opt_hora_sal", disabled=disabled)
+            return opt_hora_sal
 
-        # Fila: Hora Forzada
-        _c0, _c1, _c2, _c3 = st.columns(_W)
-        with _c0:
-            opt_act_hora_sal = st.toggle("Hora Forzada", value=False, key="opt_act_hora_sal")
-        if opt_act_hora_sal:
-            opt_hora_sal = _c1.text_input("", value="21:45", key="opt_hora_sal", label_visibility="collapsed")
-
+        # Renderizado de Salida (Opciones) en Grid 2x2
+        col1, col2 = st.columns(2)
+        with col1:
+            opt_act_sl_tp, vals_opt_sl_tp = render_watchdog_card("Stop Loss / Take Profit", "opt_act_sl_tp", fields_opt_sl_tp)
+            opt_stop_loss, opt_take_profit, opt_dest_gestion = vals_opt_sl_tp if vals_opt_sl_tp else (-300.0, 600.0, "App (Watchdog)")
+            
+            opt_act_sma_sal, vals_opt_sma_sal = render_watchdog_card("Cerrar por SMA", "opt_act_sma_sal", fields_opt_sma_sal)
+            opt_sma_per_sal, opt_sma_reg_sal = vals_opt_sma_sal if vals_opt_sma_sal else (200, "Precio < SMA")
+            
+        with col2:
+            opt_act_vix_sal, opt_vix_max = render_watchdog_card("Cerrar por VIX", "opt_act_vix_sal", fields_opt_vix_sal)
+            if opt_vix_max is None:
+                opt_vix_max = 28.0
+                
+            opt_act_hora_sal, opt_hora_sal = render_watchdog_card("Hora Forzada", "opt_act_hora_sal", fields_opt_hora_sal)
+            if opt_hora_sal is None:
+                opt_hora_sal = "21:45"
+                
         st.markdown("<br>", unsafe_allow_html=True)
         submit_opt = st.button("Encolar Estrategia Opciones", width="stretch", key="btn_encolar_opciones")
 
@@ -1528,42 +2335,164 @@ with tabs[3]:
     
     st.divider()
     
-    # 2. Formulario de Mutación en Caliente (Hot-Reloading SL/TP)
+    # 2. Formulario de Mutación en Caliente (Hot-Reloading SL/TP y condiciones de salida avanzadas)
     st.subheader("Modificación de Límites en Caliente")
-    st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Modifica instantáneamente los umbrales de Stop Loss y Take Profit de las estrategias activas. El Watchdog cargará los nuevos valores en su próximo ciclo de evaluación.</p>", unsafe_allow_html=True)
+    st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Modifica instantáneamente las condiciones de salida y límites de las estrategias activas. El Watchdog las cargará en su próximo ciclo de evaluación.</p>", unsafe_allow_html=True)
     
     todas_estrategias = db.obtener_estrategias()
     est_activas_list = [e for e in todas_estrategias if e["estado"] == "ACTIVA"]
     
     if not est_activas_list:
-        st.info("No hay estrategias activas disponibles para modificar límites.")
+        st.info("No hay estrategias activas disponibles para modificar sus condiciones de salida.")
     else:
         opciones_dropdown = {f"Estrategia #{e['id']} - {e['ticker']} ({e['tipo_activo']})": e["id"] for e in est_activas_list}
-        seleccionada_label = st.selectbox("Selecciona la Estrategia Activa", list(opciones_dropdown.keys()))
+        seleccionada_label = st.selectbox("Selecciona la Estrategia Activa", list(opciones_dropdown.keys()), key="mut_select_est_dropdown")
         est_id_select = opciones_dropdown[seleccionada_label]
         
         # Recuperamos la estrategia seleccionada
         estrategia_sel = next(e for e in est_activas_list if e["id"] == est_id_select)
         condiciones_salida_sel = estrategia_sel.get("condiciones_salida") or {}
         
-        current_sl = condiciones_salida_sel.get("stop_loss", -100.0)
-        current_tp = condiciones_salida_sel.get("take_profit", 200.0)
-        
+        # Si la estrategia seleccionada ha cambiado, precargamos sus condiciones en session_state
+        ultimo_id_sel = st.session_state.get("mut_ultimo_id_sel")
+        if ultimo_id_sel != est_id_select:
+            st.session_state["mut_ultimo_id_sel"] = est_id_select
+            
+            # SL/TP
+            st.session_state["mut_act_sl_tp"] = ("stop_loss" in condiciones_salida_sel or "take_profit" in condiciones_salida_sel)
+            st.session_state["mut_sl_val"] = float(condiciones_salida_sel.get("stop_loss", -200.0))
+            st.session_state["mut_tp_val"] = float(condiciones_salida_sel.get("take_profit", 400.0))
+            st.session_state["mut_gestion_sl_tp"] = condiciones_salida_sel.get("gestion", "App (Watchdog)")
+            
+            # VIX
+            st.session_state["mut_act_vix_salida"] = ("vix_maximo" in condiciones_salida_sel)
+            st.session_state["mut_vix_max"] = float(condiciones_salida_sel.get("vix_maximo", 30.0))
+            
+            # SMA
+            sma_cfg = condiciones_salida_sel.get("sma", {})
+            st.session_state["mut_act_sma_salida"] = bool(sma_cfg.get("activo", False))
+            st.session_state["mut_sma_per_sal"] = int(sma_cfg.get("periodo", 200))
+            st.session_state["mut_sma_reg_sal"] = sma_cfg.get("regla", "Precio < SMA")
+            
+            # Hora Forzada
+            st.session_state["mut_act_hora_salida"] = ("cierre_horario" in condiciones_salida_sel)
+            st.session_state["mut_hora_sal"] = condiciones_salida_sel.get("cierre_horario", "21:45")
+            
+        # Funciones de campos para render_watchdog_card
+        def fields_mut_sl_tp(disabled):
+            c1, c2, c3 = st.columns(3)
+            sl_val = c1.number_input("Stop Loss ($)", value=float(st.session_state.get("mut_sl_val", -200.0)), step=10.0, key="mut_sl_val_widget", disabled=disabled)
+            tp_val = c2.number_input("Take Profit ($)", value=float(st.session_state.get("mut_tp_val", 400.0)), step=10.0, key="mut_tp_val_widget", disabled=disabled)
+            
+            gest_val_current = st.session_state.get("mut_gestion_sl_tp", "App (Watchdog)")
+            gest_idx = 0 if gest_val_current == "App (Watchdog)" else 1
+            gest_val = c3.selectbox("Gestión", ["App (Watchdog)", "IBKR (Broker)"], index=gest_idx, key="mut_gestion_sl_tp_widget", disabled=disabled)
+            
+            st.session_state["mut_sl_val"] = sl_val
+            st.session_state["mut_tp_val"] = tp_val
+            st.session_state["mut_gestion_sl_tp"] = gest_val
+            return sl_val, tp_val, gest_val
+
+        def fields_mut_vix_salida(disabled):
+            vix_val = st.number_input(
+                "VIX Máximo",
+                min_value=1.0,
+                value=float(st.session_state.get("mut_vix_max", 30.0)),
+                step=0.5,
+                key="mut_vix_max_widget",
+                disabled=disabled
+            )
+            st.session_state["mut_vix_max"] = vix_val
+            return vix_val
+
+        def fields_mut_sma_salida(disabled):
+            c1, c2 = st.columns(2)
+            sma_per = c1.number_input(
+                "Periodo SMA",
+                min_value=5,
+                value=int(st.session_state.get("mut_sma_per_sal", 200)),
+                step=5,
+                key="mut_sma_per_sal_widget",
+                disabled=disabled
+            )
+            reg_val_current = st.session_state.get("mut_sma_reg_sal", "Precio < SMA")
+            reg_idx = 0 if reg_val_current == "Precio < SMA" else 1
+            sma_reg = c2.selectbox(
+                "Regla",
+                ["Precio < SMA", "Precio > SMA"],
+                index=reg_idx,
+                key="mut_sma_reg_sal_widget",
+                disabled=disabled
+            )
+            st.session_state["mut_sma_per_sal"] = sma_per
+            st.session_state["mut_sma_reg_sal"] = sma_reg
+            return sma_per, sma_reg
+
+        def fields_mut_hora_salida(disabled):
+            hora_val = st.text_input(
+                "Hora Cierre",
+                value=st.session_state.get("mut_hora_sal", "21:45"),
+                key="mut_hora_sal_widget",
+                disabled=disabled
+            )
+            st.session_state["mut_hora_sal"] = hora_val
+            return hora_val
+
+        # Renderizar en Grid 2x2
         col_m1, col_m2 = st.columns(2)
-        new_sl = col_m1.number_input("Nuevo Stop Loss ($ absoluto, ej. -150.0)", value=float(current_sl), step=10.0)
-        new_tp = col_m2.number_input("Nuevo Take Profit ($ absoluto, ej. 350.0)", value=float(current_tp), step=10.0)
-        
-        if st.button("💾 Actualizar Límites", type="primary"):
+        with col_m1:
+            act_sl_tp, _ = render_watchdog_card("Stop Loss / Take Profit", "mut_act_sl_tp", fields_mut_sl_tp)
+            act_sma, _ = render_watchdog_card("Cerrar por SMA", "mut_act_sma_salida", fields_mut_sma_salida)
+            
+        with col_m2:
+            act_vix, _ = render_watchdog_card("Cerrar por VIX", "mut_act_vix_salida", fields_mut_vix_salida)
+            act_hora, _ = render_watchdog_card("Hora Forzada", "mut_act_hora_salida", fields_mut_hora_salida)
+            
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("💾 Actualizar Condiciones de Salida", type="primary", key="btn_update_mut_conditions"):
+            # Construir el diccionario de condiciones modificado
+            cond_salida = {}
+            if st.session_state.get("mut_act_sl_tp"):
+                cond_salida["stop_loss"] = float(st.session_state.get("mut_sl_val", -200.0))
+                cond_salida["take_profit"] = float(st.session_state.get("mut_tp_val", 400.0))
+                cond_salida["gestion"] = st.session_state.get("mut_gestion_sl_tp", "App (Watchdog)")
+            if st.session_state.get("mut_act_vix_salida"):
+                cond_salida["vix_maximo"] = float(st.session_state.get("mut_vix_max", 30.0))
+            if st.session_state.get("mut_act_sma_salida"):
+                cond_salida["sma"] = {
+                    "activo": True,
+                    "periodo": int(st.session_state.get("mut_sma_per_sal", 200)),
+                    "regla": st.session_state.get("mut_sma_reg_sal", "Precio < SMA")
+                }
+            if st.session_state.get("mut_act_hora_salida"):
+                cond_salida["cierre_horario"] = st.session_state.get("mut_hora_sal", "21:45")
+                
             try:
-                res_mut = db.actualizar_limites_sl_tp(estrategia_id=est_id_select, stop_loss=new_sl, take_profit=new_tp)
+                res_mut = db.actualizar_condiciones_salida(estrategia_id=est_id_select, condiciones_salida=cond_salida)
                 if res_mut:
-                    st.success("¡Límites actualizados en la base de datos! El Watchdog cargará los nuevos límites en su siguiente ciclo.")
-                    db.registrar_evento("MUTACION_LIMITES_UI", f"Modificados límites en caliente para #{est_id_select}. SL: {new_sl}$, TP: {new_tp}$.")
+                    st.success("¡Condiciones de salida actualizadas con éxito! El Watchdog las cargará en su siguiente ciclo.")
+                    db.registrar_evento("MUTACION_LIMITES_UI", f"Modificados límites/condiciones en caliente para #{est_id_select}. Cond: {cond_salida}")
+                    
+                    # Formatear el mensaje del webhook de forma descriptiva
+                    msg_parts = []
+                    if "stop_loss" in cond_salida:
+                        msg_parts.append(f"**Stop Loss:** {cond_salida['stop_loss']}$")
+                        msg_parts.append(f"**Take Profit:** {cond_salida['take_profit']}$")
+                        msg_parts.append(f"**Gestión:** {cond_salida['gestion']}")
+                    if "vix_maximo" in cond_salida:
+                        msg_parts.append(f"**VIX Máximo:** {cond_salida['vix_maximo']}")
+                    if "sma" in cond_salida:
+                        msg_parts.append(f"**Cerrar por SMA:** Periodo {cond_salida['sma']['periodo']} ({cond_salida['sma']['regla']})")
+                    if "cierre_horario" in cond_salida:
+                        msg_parts.append(f"**Hora Forzada:** {cond_salida['cierre_horario']}")
+                        
                     enviar_alerta_webhook(
-                        titulo="🔄 Límites de Riesgo Modificados",
-                        mensaje=f"**ID Estrategia:** {est_id_select}\n**Nuevo Stop Loss:** {new_sl}$\n**Nuevo Take Profit:** {new_tp}$",
+                        titulo="🔄 Condiciones de Salida Modificadas en Caliente",
+                        mensaje=f"**ID Estrategia:** {est_id_select}\n" + "\n".join(msg_parts),
                         color="warning"
                     )
+                    st.session_state["mut_ultimo_id_sel"] = None
+                    time.sleep(0.5)
                     st.rerun()
                 else:
                     st.error("No se pudo actualizar los límites de la estrategia.")
