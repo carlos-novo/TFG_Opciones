@@ -236,3 +236,113 @@ def test_obtener_pnl_posiciones_filtrado(mock_ib_class, gestor):
     # P&L total sin filtros (solo STK y OPT)
     pnl_total = gestor.obtener_pnl_posiciones_filtrado()
     assert pnl_total == round(100.50 - 45.00 + 200.00, 2)
+
+
+@patch('conexion_ibkr.IB')
+def test_enviar_orden_generica_bag_debito(mock_ib_class, gestor):
+    ib_instance = mock_ib_class.return_value
+    gestor.ib = ib_instance
+    ib_instance.connect = MagicMock()
+    ib_instance.isConnected = MagicMock(return_value=True)
+    
+    # Mock qualification logic
+    def mock_qualify(*contracts):
+        for idx, c in enumerate(contracts):
+            c.conId = 2000 + idx
+    ib_instance.qualifyContracts = mock_qualify
+    
+    trade_mock = MagicMock()
+    trade_mock.order.orderId = 999
+    trade_mock.orderStatus.status = "PreSubmitted"
+    ib_instance.placeOrder = MagicMock(return_value=trade_mock)
+    
+    patas = [
+        {"tipo_activo": "OPTION", "vencimiento": "20260620", "strike": 100.0, "right": "P", "accion": "BUY", "cantidad": 1},
+        {"tipo_activo": "OPTION", "vencimiento": "20260620", "strike": 110.0, "right": "P", "accion": "SELL", "cantidad": 1}
+    ]
+    
+    # Enviamos orden combo con precio_limite = -1.50 (débito negativo).
+    # Debe convertirse a precio positivo (+1.50) para la orden BUY del combo en TWS.
+    resultado = gestor.enviar_orden_generica("MSFT", "BAG", patas, precio_limite=-1.50)
+    
+    assert resultado["order_id"] == 999
+    assert resultado["status"] == "PreSubmitted"
+    
+    args = ib_instance.placeOrder.call_args[0]
+    order_arg = args[1]
+    
+    assert isinstance(order_arg, LimitOrder)
+    assert order_arg.action == "BUY"
+    assert order_arg.lmtPrice == 1.50
+
+
+@patch('conexion_ibkr.IB')
+def test_enviar_orden_generica_bag_mercado(mock_ib_class, gestor):
+    ib_instance = mock_ib_class.return_value
+    gestor.ib = ib_instance
+    ib_instance.connect = MagicMock()
+    ib_instance.isConnected = MagicMock(return_value=True)
+    
+    # Mock qualification logic
+    def mock_qualify(*contracts):
+        for idx, c in enumerate(contracts):
+            c.conId = 3000 + idx
+    ib_instance.qualifyContracts = mock_qualify
+    
+    trade_mock = MagicMock()
+    trade_mock.order.orderId = 1001
+    trade_mock.orderStatus.status = "Submitted"
+    ib_instance.placeOrder = MagicMock(return_value=trade_mock)
+    
+    patas = [
+        {"tipo_activo": "OPTION", "vencimiento": "20260620", "strike": 100.0, "right": "P", "accion": "BUY", "cantidad": 1},
+        {"tipo_activo": "OPTION", "vencimiento": "20260620", "strike": 110.0, "right": "P", "accion": "SELL", "cantidad": 1}
+    ]
+    
+    # Enviamos orden combo a mercado (precio_limite = None).
+    resultado = gestor.enviar_orden_generica("MSFT", "BAG", patas, precio_limite=None)
+    
+    assert resultado["order_id"] == 1001
+    assert resultado["status"] == "Submitted"
+    
+    args = ib_instance.placeOrder.call_args[0]
+    order_arg = args[1]
+    
+    assert isinstance(order_arg, MarketOrder)
+    assert order_arg.action == "BUY"
+
+
+@patch('conexion_ibkr.IB')
+def test_obtener_estado_orden(mock_ib_class, gestor):
+    ib_instance = mock_ib_class.return_value
+    gestor.ib = ib_instance
+    ib_instance.connect = MagicMock()
+    ib_instance.isConnected = MagicMock(return_value=True)
+    
+    # 1. Test cuando está en openTrades
+    trade_open = MagicMock()
+    trade_open.order.orderId = 123
+    trade_open.orderStatus.status = "Submitted"
+    trade_open.orderStatus.avgFillPrice = 1.25
+    
+    ib_instance.openTrades = MagicMock(return_value=[trade_open])
+    ib_instance.trades = MagicMock(return_value=[])
+    
+    res1 = gestor.obtener_estado_orden(123)
+    assert res1 == {"status": "Submitted", "avg_fill_price": 1.25}
+    
+    # 2. Test cuando está en trades finalizados
+    trade_closed = MagicMock()
+    trade_closed.order.orderId = 456
+    trade_closed.orderStatus.status = "Filled"
+    trade_closed.orderStatus.avgFillPrice = 0.90
+    
+    ib_instance.openTrades = MagicMock(return_value=[])
+    ib_instance.trades = MagicMock(return_value=[trade_closed])
+    
+    res2 = gestor.obtener_estado_orden(456)
+    assert res2 == {"status": "Filled", "avg_fill_price": 0.90}
+    
+    # 3. Test cuando no se encuentra
+    res3 = gestor.obtener_estado_orden(789)
+    assert res3 is None

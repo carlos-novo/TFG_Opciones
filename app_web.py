@@ -72,8 +72,204 @@ else:
             return func
         return decorator
 
+def set_confirm_global(qty):
+    if st.session_state.liq_qty <= 0:
+        st.session_state.liq_error = "La cantidad a vender debe ser mayor que 0."
+    elif round(st.session_state.liq_qty, 4) > round(abs(qty), 4):
+        st.session_state.liq_error = "No puedes vender más posiciones de las que posees."
+    else:
+        st.session_state.liq_confirm = True
+        st.session_state.liq_error = None
+        # Persist values for the confirmation screen
+        st.session_state.liq_qty_final = st.session_state.liq_qty
+        st.session_state.liq_amount_final = st.session_state.liq_amount
+        st.session_state.liq_radio_final = st.session_state.liq_radio_selector
+
+def reset_confirm_global():
+    st.session_state.liq_confirm = False
+    st.session_state.liq_error = None
+    st.session_state.liq_qty_final = None
+    st.session_state.liq_amount_final = None
+    st.session_state.liq_radio_final = None
+
+def confirmar_y_ejecutar_venta_global(simbolo, tipo, qty, total_mercado, pnl, pos):
+    try:
+        broker_inst = st.session_state.broker
+        es_broker_conectado = broker_inst is not None and broker_inst.esta_conectado()
+        
+        qty_a_vender = st.session_state.get("liq_qty_final", st.session_state.get("liq_qty"))
+        if qty_a_vender is None:
+            raise ValueError("No se especificó la cantidad a vender (liq_qty_final es None).")
+            
+        if es_broker_conectado:
+            pata_org = {
+                "tipo_activo": "OPTION" if tipo in ("Opción", "OPT", "Option") else "STOCK",
+                "accion": "BUY" if qty > 0 else "SELL",
+                "cantidad": qty_a_vender
+            }
+            if pata_org["tipo_activo"] == "OPTION":
+                pata_org["strike"] = pos.get("Strike")
+                pata_org["right"] = pos.get("Right (C/P)")
+                pata_org["vencimiento"] = pos.get("Vencimiento")
+            
+            broker_res = broker_inst.enviar_orden_cierre_generica(
+                ticker=simbolo,
+                tipo_activo=pata_org["tipo_activo"],
+                patas=[pata_org]
+            )
+            order_id_sal = broker_res["order_id"]
+        else:
+            order_id_sal = random.randint(100000, 999999)
+        
+        # Buscar si hay alguna estrategia activa asociada
+        est_asociada = None
+        try:
+            estrategias_activas = db.obtener_estrategias(estado="ACTIVA")
+            for e in estrategias_activas:
+                tipo_act_sel = "OPTION" if tipo in ("Opción", "OPT", "Option") else "STOCK"
+                if e.get("ticker", "").upper() == simbolo.upper() and e.get("tipo_activo", "").upper() == tipo_act_sel:
+                    est_asociada = e
+                    break
+        except Exception as e_db_chk:
+            print(f"Error al buscar estrategia asociada para cierre: {e_db_chk}")
+            
+        # Si es venta completa
+        es_venta_completa = abs(qty_a_vender - abs(qty)) < 0.0001
+        
+        if est_asociada:
+            if es_venta_completa:
+                # Venta completa -> CERRADA_MANUAL
+                db.actualizar_estado_estrategia(
+                    estrategia_id=est_asociada["id"],
+                    nuevo_estado="CERRADA_MANUAL",
+                    order_id_salida=order_id_sal,
+                    precio_salida=0.0,
+                    pnl_realizado=pnl if pnl is not None else 0.0,
+                    fecha_cierre=datetime.now().isoformat()
+                )
+                db.registrar_evento("CIERRE_MANUAL_UI", f"Estrategia #{est_asociada['id']} ({simbolo}) cerrada y liquidada por completo desde el Dashboard.")
+            else:
+                # Venta parcial -> Actualizar cantidad en patas de la estrategia
+                try:
+                    patas_actualizadas = []
+                    patas_sel = est_asociada.get("patas", [])
+                    if not patas_sel and est_asociada.get("patas_json"):
+                        patas_sel = json.loads(est_asociada["patas_json"])
+                    for p in patas_sel:
+                        p_new = p.copy()
+                        p_new["cantidad"] = float(p.get("cantidad", 1)) - qty_a_vender
+                        patas_actualizadas.append(p_new)
+                    db.actualizar_patas(est_asociada["id"], patas_actualizadas)
+                    db.registrar_evento("CIERRE_PARCIAL_UI", f"Estrategia #{est_asociada['id']} ({simbolo}) liquidada parcialmente. Vendidas {qty_a_vender} posiciones. Restan {patas_actualizadas[0]['cantidad']}.")
+                except Exception as e_upd_pat:
+                    print(f"Error al actualizar patas por cierre parcial: {e_upd_pat}")
+        else:
+            if es_venta_completa:
+                db.registrar_evento("LIQUIDACION_POSICION_HUERFANA", f"Posición huérfana completa de {simbolo} ({tipo}, cant={qty}) liquidada directamente desde el Dashboard. OrderID: {order_id_sal}")
+            else:
+                db.registrar_evento("LIQUIDACION_PARCIAL_HUERFANA", f"Posición huérfana parcial de {simbolo} ({tipo}, cant={qty}) liquidada directamente desde el Dashboard. Vendidas={qty_a_vender}. OrderID: {order_id_sal}")
+        
+        # Notificar
+        pnl_proporcional = (pnl if pnl is not None else 0.0) * (qty_a_vender / abs(qty))
+        enviar_alerta_webhook(
+            titulo="🛑 Posición Liquidada desde Dashboard",
+            mensaje=f"**Activo:** {simbolo}\n**Tipo:** {tipo}\n**Cantidad Vendida:** {qty_a_vender}\n**Tipo Venta:** {'Completa' if es_venta_completa else 'Parcial'}\n**P&L Estimado Proporcional:** ${pnl_proporcional:.2f}\n**OrderID Cierre:** {order_id_sal}",
+            color="warning"
+        )
+        st.session_state.liq_confirm = False
+        st.session_state.liq_error = None
+        st.session_state.liq_qty_final = None
+        st.session_state.liq_amount_final = None
+        st.session_state.liq_radio_final = None
+        st.session_state.liq_success_toast = f"Orden de liquidación de {qty_a_vender} posiciones en {simbolo} enviada con éxito."
+        st.rerun()
+    except Exception as ex_liq:
+        st.session_state.liq_error = f"Error al liquidar posición: {ex_liq}"
+        st.session_state.liq_confirm = True
+
 @st_dialog("Detalle de Posición")
 def mostrar_detalle_posicion(pos):
+    # Inyectar estilos CSS para asegurar el formato de la modal y sus botones
+    st.markdown("""
+    <style>
+        div[role="dialog"],
+        div[data-baseweb="modal"] [role="dialog"],
+        div[data-testid="stDialog"] [role="dialog"],
+        div[class*="stDialog"] [role="dialog"] {
+            width: 780px !important;
+            max-width: 90vw !important;
+            margin: auto !important;
+        }
+        div.stButton > button {
+            background: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%) !important;
+            color: white !important;
+            border: none !important;
+            border-radius: 10px !important;
+            font-weight: 600 !important;
+            padding: 10px 24px !important;
+            box-shadow: 0 4px 14px rgba(79, 70, 229, 0.4) !important;
+            transition: all 0.2s ease !important;
+        }
+        div.stButton > button:hover {
+            box-shadow: 0 6px 20px rgba(79, 70, 229, 0.6) !important;
+            background: linear-gradient(135deg, #5a52e6 0%, #4c8ff7 100%) !important;
+            color: white !important;
+        }
+        /* Metric styling inside dialog */
+        div[data-testid="stMetric"] {
+            background: rgba(255, 255, 255, 0.02) !important;
+            border: 1px solid rgba(255, 255, 255, 0.05) !important;
+            border-radius: 16px !important;
+            padding: 20px !important;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37) !important;
+            backdrop-filter: blur(10px) !important;
+            -webkit-backdrop-filter: blur(10px) !important;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        }
+        div[data-testid="stMetric"]:hover {
+            border-color: rgba(99, 102, 241, 0.4) !important;
+            box-shadow: 0 8px 32px 0 rgba(99, 102, 241, 0.15) !important;
+            transform: translateY(-3px) !important;
+        }
+        /* Prevent metric label truncation & force wrapping */
+        div[data-testid="stMetric"] [data-testid="stMetricLabel"] {
+            white-space: normal !important;
+            word-wrap: break-word !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
+            font-size: 0.85rem !important;
+            line-height: 1.25 !important;
+            min-height: 2.2rem !important;
+            display: flex !important;
+            align-items: center !important;
+        }
+        div[data-testid="stMetric"] [data-testid="stMetricLabel"] > div {
+            white-space: normal !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
+        }
+        /* Metric values in theme blue, sized to match the header, preventing truncation */
+        div[data-testid="stMetricValue"],
+        div[data-testid="stMetricValue"] * {
+            color: #6366f1 !important;
+            font-size: 0.85rem !important;
+            white-space: normal !important;
+            word-wrap: break-word !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
+        }
+        /* Metric delta values styling */
+        div[data-testid="stMetricDelta"],
+        div[data-testid="stMetricDelta"] * {
+            font-size: 0.75rem !important;
+            white-space: normal !important;
+            word-wrap: break-word !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
     simbolo = pos.get('Símbolo')
     tipo = pos.get('Tipo')
     qty = pos.get('Posición', 0.0)
@@ -287,8 +483,121 @@ def mostrar_detalle_posicion(pos):
     
     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
+    # 3. Formulario "¿Cuánto quieres vender?"
+    st.markdown("<hr style='opacity: 0.1; margin: 10px 0;' />", unsafe_allow_html=True)
+    
+    # Inicializar el estado de la liquidación para este activo específico
+    if st.session_state.get("liq_active_symbol") != simbolo or (not st.session_state.get("liq_confirm") and "liq_radio_selector" not in st.session_state):
+        st.session_state.liq_active_symbol = simbolo
+        st.session_state.liq_radio_selector = "Todo el fondo"
+        st.session_state.liq_qty = float(abs(qty))
+        st.session_state.liq_amount = float(total_mercado)
+        st.session_state.liq_confirm = False
+        st.session_state.liq_error = None
+
+    def on_radio_change():
+        if st.session_state.liq_radio_selector == "Todo el fondo":
+            st.session_state.liq_qty = float(abs(qty))
+            st.session_state.liq_amount = float(total_mercado)
+        st.session_state.liq_error = None
+
+    def update_qty_callback():
+        st.session_state.liq_error = None
+        amt = st.session_state.liq_amount
+        max_amt = float(total_mercado)
+        if amt > max_amt:
+            amt = max_amt
+            st.session_state.liq_amount = amt
+        
+        calculated_qty = amt / (market_price * multiplier) if (market_price > 0 and multiplier > 0) else 0.0
+        max_qty = float(abs(qty))
+        if calculated_qty > max_qty:
+            calculated_qty = max_qty
+            
+        if tipo in ("Opción", "OPT", "Option") or float(qty).is_integer():
+            st.session_state.liq_qty = float(round(calculated_qty))
+        else:
+            st.session_state.liq_qty = float(round(calculated_qty, 4))
+
+    def update_amount_callback():
+        st.session_state.liq_error = None
+        q = st.session_state.liq_qty
+        max_qty = float(abs(qty))
+        if q > max_qty:
+            q = max_qty
+            st.session_state.liq_qty = q
+            
+        calculated_amt = q * market_price * multiplier
+        max_amt = float(total_mercado)
+        if calculated_amt > max_amt:
+            calculated_amt = max_amt
+            
+        st.session_state.liq_amount = float(round(calculated_amt, 2))
+
+    if st.session_state.get("liq_error"):
+        st.error(st.session_state.liq_error)
+
+    if st.session_state.get("liq_confirm"):
+        # --- VISTA DE CONFIRMACIÓN ---
+        st.warning("⚠️ **Confirmación Requerida**")
+        liq_radio = st.session_state.get("liq_radio_final", st.session_state.get("liq_radio_selector", "Todo el fondo"))
+        if liq_radio == "Todo el fondo":
+            st.markdown(f"#### ¿Estás seguro que quieres vender todo el fondo?")
+            st.markdown(f"Se liquidará la posición completa de **{simbolo}** (**{abs(qty)}** posiciones) por un valor estimado de **${total_mercado:,.2f}**.")
+        else:
+            # Mostrar el número de posiciones como entero si lo es, o con 4 decimales
+            liq_qty_val = st.session_state.get("liq_qty_final", st.session_state.get("liq_qty", 0.0))
+            liq_amount_val = st.session_state.get("liq_amount_final", st.session_state.get("liq_amount", 0.0))
+            qty_fmt = f"{int(liq_qty_val)}" if liq_qty_val.is_integer() else f"{liq_qty_val:.4f}"
+            st.markdown(f"#### ¿Estás seguro que quieres vender {qty_fmt} número de posiciones?")
+            st.markdown(f"Se venderá una parte de la posición de **{simbolo}** por un valor estimado de **${liq_amount_val:,.2f}**.")
+            
+        col_c1, col_c2 = st.columns(2)
+        with col_c1:
+            st.button("🟢 Sí, confirmar venta", key=f"btn_yes_liq_{simbolo}", use_container_width=True, on_click=confirmar_y_ejecutar_venta_global, args=(simbolo, tipo, qty, total_mercado, pnl, pos))
+        with col_c2:
+            st.button("🔴 Cancelar", key=f"btn_cancel_liq_{simbolo}", use_container_width=True, on_click=reset_confirm_global)
+    else:
+        # --- VISTA DEL FORMULARIO DE LIQUIDACIÓN ---
+        st.markdown("<p style='font-size: 1.1rem; font-weight: bold; margin-bottom: 5px;'>¿Cuánto quieres vender?</p>", unsafe_allow_html=True)
+        
+        st.radio(
+            "Selecciona cantidad a vender",
+            options=["Todo el fondo", "Parte del fondo"],
+            key="liq_radio_selector",
+            horizontal=True,
+            on_change=on_radio_change,
+            label_visibility="collapsed"
+        )
+        
+        col_imp, col_part = st.columns(2)
+        with col_imp:
+            st.number_input(
+                "Importe ($)",
+                min_value=0.0,
+                max_value=float(total_mercado),
+                key="liq_amount",
+                on_change=update_qty_callback,
+                disabled=(st.session_state.liq_radio_selector == "Todo el fondo")
+            )
+        with col_part:
+            st.number_input(
+                "Posiciones / Contratos",
+                min_value=0.0,
+                max_value=float(abs(qty)),
+                key="liq_qty",
+                on_change=update_amount_callback,
+                disabled=(st.session_state.liq_radio_selector == "Todo el fondo")
+            )
+            
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+        
+        col_sp, col_btn_act = st.columns([3.5, 1.5])
+        with col_btn_act:
+            st.button("🔴 Liquidar Posición", key=f"btn_liq_act_{simbolo}", use_container_width=True, on_click=set_confirm_global, args=(qty,))
+
 # --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="Plataforma de Trading Multileg", layout="wide")
+st.set_page_config(page_title="Plataforma de Trading Multileg", page_icon="figures/favicon.png", layout="wide")
 
 # --- ESTILOS PREMIUM GLASSMORPHISM (DARK MODE) ---
 st.markdown("""
@@ -924,6 +1233,10 @@ if not st.session_state['autenticado']:
     st.stop()
 
 # --- APLICACIÓN PRINCIPAL (AUTENTICADO) ---
+if st.session_state.get("liq_success_toast"):
+    st.toast(st.session_state.liq_success_toast, icon="✅")
+    del st.session_state["liq_success_toast"]
+
 if 'broker' not in st.session_state:
     st.session_state.broker = obtener_broker_global()
 
@@ -983,17 +1296,21 @@ with st.container(key="top_toolbar_container"):
     col_logo, col_cot, col_conn, col_logout = st.columns([7.2, 1.2, 1.5, 1.1], vertical_alignment="center")
 
     with col_logo:
-        st.markdown("""
-        <h1 style='margin:0; font-size:2.5rem; font-weight:800; font-family:"Outfit", sans-serif;
-                   background: linear-gradient(135deg, #6366f1 0%, #3b82f6 100%);
-                   -webkit-background-clip: text; -webkit-text-fill-color: #6366f1;
-                   letter-spacing:-0.03em; line-height:1.1;'>
-            Plataforma Algorítmica Multileg
-        </h1>
-        <p style='color: #94a3b8; font-size: 0.95rem; margin-top: 4px; margin-bottom: 0;'>
-            Watchdogs en segundo plano, sensibilidades Black-Scholes y gestión de riesgo
-        </p>
-        """, unsafe_allow_html=True)
+        col_img, col_txt = st.columns([0.8, 6.4], vertical_alignment="center")
+        with col_img:
+            st.image("figures/favicon.png", width=65)
+        with col_txt:
+            st.markdown("""
+            <h1 style='margin:0; font-size:2.5rem; font-weight:800; font-family:"Outfit", sans-serif;
+                       background: linear-gradient(135deg, #6366f1 0%, #3b82f6 100%);
+                       -webkit-background-clip: text; -webkit-text-fill-color: #6366f1;
+                       letter-spacing:-0.03em; line-height:1.1;'>
+                Plataforma Algorítmica Multileg
+            </h1>
+            <p style='color: #94a3b8; font-size: 0.95rem; margin-top: 4px; margin-bottom: 0;'>
+                Watchdogs en segundo plano, sensibilidades Black-Scholes y gestión de riesgo
+            </p>
+            """, unsafe_allow_html=True)
 
     with col_cot:
         if st.button("Consultar Precio", use_container_width=True, key="btn_top_cot"):
@@ -1409,7 +1726,7 @@ with tabs[1]:
 
     st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Encolador de estrategias con reglas de entrada técnicas y límites de salida absolutos.</p>", unsafe_allow_html=True)
     
-    c_a1, c_a2, c_a3 = st.columns(3)
+    c_a1, c_a2, c_a3, c_a4 = st.columns(4)
     ticker_acc = c_a1.text_input("Ticker", value="AAPL", max_chars=5, key="acc_ticker").upper()
     cant_acc = c_a2.number_input("Cantidad de Acciones", min_value=1, value=50, step=1, key="acc_cantidad")
     
@@ -1419,6 +1736,9 @@ with tabs[1]:
             precio_limite_acc = st.number_input("Precio Límite ($)", min_value=0.01, value=150.0, step=0.1, key="acc_precio_limite")
         else:
             precio_limite_acc = None
+            
+    with c_a4:
+        tif_acc = st.selectbox("Validez (TIF)", ["DAY", "GTC"], index=0, key="acc_tif", help="**DAY**: Válida sólo durante el día de negociación.\n\n**GTC**: Válida hasta que se ejecute o cancele.")
             
     accion_acc = "BUY"
     
@@ -1546,6 +1866,7 @@ with tabs[1]:
                 cond_entrada["precio_disparador"] = {"activo": True, "valor": float(val_precio_acc), "operador": op_precio_acc}
             # Frecuencia de ejecución
             cond_entrada["frecuencia"] = {"activo": (frec_acc != "Única"), "tipo": frec_acc}
+            cond_entrada["tif"] = tif_acc
                 
             cond_salida = {}
             if act_sl_tp:
@@ -2020,6 +2341,7 @@ with tabs[2]:
         col_o1, col_o2, col_o3 = st.columns(3)
         with col_o1:
             opt_tipo_lmt = st.selectbox("Tipo de Orden", ["Crédito/Débito Neto", "Mercado"], key="opt_tipo_lmt")
+        
         opt_precio_entrada = None
         if opt_tipo_lmt == "Crédito/Débito Neto":
             with col_o2:
@@ -2027,6 +2349,9 @@ with tabs[2]:
                     "Prima de Entrada Objetivo ($ neto, crédito = + / débito = -)",
                     value=0.0, step=0.1, key="opt_prima_obj"
                 )
+        
+        with col_o3:
+            opt_tif_val = st.selectbox("Validez (TIF)", ["DAY", "GTC"], index=0, key="opt_tif", help="**DAY**: Válida sólo durante el día de negociación.\n\n**GTC**: Válida hasta que se ejecute o cancele.")
 
         st.divider()
 
@@ -2156,6 +2481,7 @@ with tabs[2]:
             if opt_act_precio:
                 opt_cond_ent["precio_disparador"] = {"activo": True, "valor": float(opt_precio_val), "operador": opt_precio_op}
             opt_cond_ent["frecuencia"] = {"activo": (opt_frecuencia != "Única"), "tipo": opt_frecuencia}
+            opt_cond_ent["tif"] = opt_tif_val
 
             # Construimos condiciones de salida
             opt_cond_sal = {}
@@ -2587,45 +2913,53 @@ with tabs[3]:
     # 4. Historial Completo y Descarga CSV
     st.subheader("Historial de Estrategias y Registro de Auditoría")
     
-    df_est_hist = db.obtener_estrategias_df()
-    if not df_est_hist.empty:
-        # Convertir columnas complejas a strings JSON para evitar errores de PyArrow
-        for col in ["patas", "condiciones_entrada", "condiciones_salida"]:
-            if col in df_est_hist.columns:
-                df_est_hist[col] = df_est_hist[col].apply(lambda x: json.dumps(x) if isinstance(x, (dict, list)) else str(x))
-    df_audit_logs = db.obtener_logs(limit=100)
-    
-    # Tablas de datos
-    tab_est, tab_aud = st.tabs(["Listado de Estrategias", "Registro de Auditoría (Logs)"])
-    
-    with tab_est:
-        if df_est_hist.empty:
-            st.info("No hay registros en el historial de estrategias.")
-        else:
-            st.dataframe(df_est_hist, width="stretch", hide_index=True)
-            st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
-            csv_est = df_est_hist.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Descargar Historial de Estrategias (CSV)",
-                data=csv_est,
-                file_name="historial_estrategias_tfg.csv",
-                mime="text/csv",
-                use_container_width=False,
-                key="btn_dl_est"
-            )
+    @st.fragment(run_every=10)
+    def render_historial_y_auditoria():
+        col_space, col_btn = st.columns([5, 1])
+        with col_btn:
+            st.button("Actualizar", key="btn_refresh_hist_frag", use_container_width=True)
             
-    with tab_aud:
-        if df_audit_logs.empty:
-            st.info("No hay eventos registrados en la auditoría.")
-        else:
-            st.dataframe(df_audit_logs, width="stretch", hide_index=True)
-            st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
-            csv_audit = df_audit_logs.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Descargar Logs de Auditoría (CSV)",
-                data=csv_audit,
-                file_name="logs_auditoria_tfg.csv",
-                mime="text/csv",
-                use_container_width=False,
-                key="btn_dl_aud"
-            )
+        df_est_hist = db.obtener_estrategias_df()
+        if not df_est_hist.empty:
+            # Convertir columnas complejas a strings JSON para evitar errores de PyArrow
+            for col in ["patas", "condiciones_entrada", "condiciones_salida"]:
+                if col in df_est_hist.columns:
+                    df_est_hist[col] = df_est_hist[col].apply(lambda x: json.dumps(x) if isinstance(x, (dict, list)) else str(x))
+        df_audit_logs = db.obtener_logs(limit=100)
+        
+        # Tablas de datos
+        tab_est, tab_aud = st.tabs(["Listado de Estrategias", "Registro de Auditoría (Logs)"])
+        
+        with tab_est:
+            if df_est_hist.empty:
+                st.info("No hay registros en el historial de estrategias.")
+            else:
+                st.dataframe(df_est_hist, width="stretch", hide_index=True)
+                st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
+                csv_est = df_est_hist.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Descargar Historial de Estrategias (CSV)",
+                    data=csv_est,
+                    file_name="historial_estrategias_tfg.csv",
+                    mime="text/csv",
+                    use_container_width=False,
+                    key="btn_dl_est"
+                )
+                
+        with tab_aud:
+            if df_audit_logs.empty:
+                st.info("No hay eventos registrados en la auditoría.")
+            else:
+                st.dataframe(df_audit_logs, width="stretch", hide_index=True)
+                st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
+                csv_audit = df_audit_logs.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Descargar Logs de Auditoría (CSV)",
+                    data=csv_audit,
+                    file_name="logs_auditoria_tfg.csv",
+                    mime="text/csv",
+                    use_container_width=False,
+                    key="btn_dl_aud"
+                )
+                
+    render_historial_y_auditoria()

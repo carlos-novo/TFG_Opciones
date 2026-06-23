@@ -399,3 +399,19 @@ class GestorBaseDatos:
             return False
         finally:
             conexion.close()
+
+    def actualizar_patas(self, estrategia_id, patas):
+        """Actualiza las patas de una estrategia en formato JSON."""
+        conexion = self._conectar()
+        cursor = conexion.cursor()
+        try:
+            patas_json = json.dumps(patas)
+            cursor.execute("UPDATE estrategias SET patas_json = ? WHERE id = ?", (patas_json, estrategia_id))
+            conexion.commit()
+            self.registrar_evento("ACTUALIZAR_PATAS_ESTRATEGIA", f"Patas de Estrategia ID {estrategia_id} actualizadas.")
+            return True
+        except Exception as e:
+            self.registrar_evento("ERROR_ACTUALIZAR_PATAS", f"Error al actualizar patas de ID {estrategia_id}: {e}")
+            return False
+        finally:
+            conexion.close()

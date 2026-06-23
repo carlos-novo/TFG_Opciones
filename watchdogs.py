@@ -27,16 +27,173 @@ def watchdog_entradas_worker(db_name, interval, stop_event, broker=None):
     try:
         while not stop_event.is_set():
             try:
-                # 1. Obtener estrategias pendientes de entrada
+                # 1. Obtener estrategias pendientes de entrada o con orden enviada
                 pendientes = db.obtener_estrategias(estado="PENDIENTE_ENTRADA")
+                enviadas = db.obtener_estrategias(estado="ORDEN_ENVIADA")
                 
-                if pendientes:
-                    # Nos conectamos a IBKR solo si hay tareas pendientes (o si ya está conectado en modo compartido)
+                # 1a. Limpieza offline de órdenes DAY expiradas (incluso si el bróker está desconectado)
+                if enviadas:
+                    for est in list(enviadas):
+                        if stop_event.is_set():
+                            break
+                        condiciones = est.get("condiciones_entrada") or {}
+                        tif_val = condiciones.get("tif", "DAY").upper()
+                        
+                        if tif_val == "DAY":
+                            fecha_creacion_str = est.get("fecha_creacion")
+                            if fecha_creacion_str:
+                                try:
+                                    fecha_creacion_dt = datetime.fromisoformat(fecha_creacion_str)
+                                    if datetime.now().date() > fecha_creacion_dt.date():
+                                        db.actualizar_estado_estrategia(
+                                            estrategia_id=est["id"],
+                                            nuevo_estado="CANCELADA"
+                                        )
+                                        db.registrar_evento(
+                                            "WATCHDOG_ENTRADA_EXPIRADA_OFFLINE",
+                                            f"Estrategia ID {est['id']} ({est['ticker']}) marcada como CANCELADA por expiración offline (orden DAY del día anterior)."
+                                        )
+                                        enviar_alerta_webhook(
+                                            titulo="⏰ Orden de Entrada Expirada (Offline)",
+                                            mensaje=f"**ID Estrategia:** {est['id']}\n**Ticker:** {est['ticker']}\n**OrderID:** {est.get('order_id_entrada')}\nLa orden DAY del día anterior expiró al finalizar el día (detectado offline).",
+                                            color="warning"
+                                        )
+                                        # La removemos de la lista local para evitar procesarla en modo conectado en este ciclo
+                                        enviadas.remove(est)
+                                except Exception as ex_exp:
+                                    print(f"[WATCHDOG ENTRADAS] Error al evaluar expiración offline de ID {est['id']}: {ex_exp}")
+
+                if pendientes or enviadas:
+                    # Nos conectamos a IBKR solo si hay tareas (o si ya está conectado en modo compartido)
                     if (es_compartido and broker.esta_conectado()) or (not es_compartido and broker.conectar()):
                         conectado = True
+                        
+                        # 1b. Procesar estrategias en estado ORDEN_ENVIADA
+                        for est in enviadas:
+                            if stop_event.is_set():
+                                break
+                            if est.get("estado") != "ORDEN_ENVIADA":
+                                continue
+                            oid = est.get("order_id_entrada")
+                            if not oid:
+                                continue
+                            ticker = est["ticker"]
+                            tipo_activo = est["tipo_activo"]
+                            
+                            try:
+                                res_estado = broker.obtener_estado_orden(oid)
+                                if res_estado:
+                                    status = res_estado["status"]
+                                    avg_fill = res_estado["avg_fill_price"]
+                                    
+                                    if status == "Filled":
+                                        pr_entrada = avg_fill if avg_fill is not None and avg_fill != 0.0 else est["precio_entrada"]
+                                        if pr_entrada is not None and tipo_activo in ("BAG", "OPTION"):
+                                            pr_entrada = abs(pr_entrada)
+                                            
+                                        db.actualizar_estado_estrategia(
+                                            estrategia_id=est["id"],
+                                            nuevo_estado="ACTIVA",
+                                            precio_entrada=pr_entrada
+                                        )
+                                        db.registrar_evento(
+                                            "WATCHDOG_ENTRADA_EJECUTADA",
+                                            f"Estrategia ID {est['id']} ({ticker}) activada tras ejecución completa de orden. OrderID: {oid}. Precio Ejecución: {pr_entrada}"
+                                        )
+                                        enviar_alerta_webhook(
+                                            titulo="🚀 Estrategia Activada (Orden Ejecutada)",
+                                            mensaje=f"**ID Estrategia:** {est['id']}\n**Ticker:** {ticker}\n**Tipo Activo:** {tipo_activo}\n**Precio/Prima Entrada:** {pr_entrada}$\n**OrderID:** {oid}",
+                                            color="success"
+                                        )
+                                        
+                                        # Si es de tipo STOCK y la gestión de salida es en el bróker, colocamos SL y TP allí
+                                        if tipo_activo == "STOCK" and est.get("condiciones_salida", {}).get("gestion") == "Gestionado por IBKR (Órdenes en Broker)":
+                                            try:
+                                                res_prot = broker.enviar_ordenes_proteccion_ibkr(
+                                                    ticker=ticker,
+                                                    accion_entrada=est["patas"][0]["accion"],
+                                                    cantidad=est["patas"][0]["cantidad"],
+                                                    precio_entrada=pr_entrada,
+                                                    stop_loss_usd=est["condiciones_salida"].get("stop_loss"),
+                                                    take_profit_usd=est["condiciones_salida"].get("take_profit")
+                                                )
+                                                db.registrar_evento(
+                                                    "IBKR_PROTECTION_ORDERS_SENT",
+                                                    f"Enviadas órdenes de protección en bróker para Estrategia #{est['id']}. Detalles: {res_prot}"
+                                                )
+                                            except Exception as ex_prot:
+                                                db.registrar_evento(
+                                                    "IBKR_PROTECTION_ORDERS_ERROR",
+                                                    f"Error al enviar órdenes de protección en bróker para Estrategia #{est['id']}: {ex_prot}"
+                                                )
+                                                
+                                    elif status in ("Cancelled", "Inactive", "Rejected") or "Cancelled" in str(status) or "Rejected" in str(status):
+                                        db.actualizar_estado_estrategia(
+                                            estrategia_id=est["id"],
+                                            nuevo_estado="CANCELADA"
+                                        )
+                                        db.registrar_evento(
+                                            "WATCHDOG_ENTRADA_CANCELADA",
+                                            f"Estrategia ID {est['id']} ({ticker}) cancelada en bróker. Estado: {status}"
+                                        )
+                                        enviar_alerta_webhook(
+                                            titulo="⚠️ Orden de Entrada Cancelada/Rechazada",
+                                            mensaje=f"**ID Estrategia:** {est['id']}\n**Ticker:** {ticker}\n**OrderID:** {oid}\n**Estado bróker:** {status}",
+                                            color="warning"
+                                        )
+                                else:
+                                    # Si res_estado es None, significa que la orden no se encuentra en la sesión activa del bróker.
+                                    # Evaluamos según el TIF configurado:
+                                    condiciones = est.get("condiciones_entrada") or {}
+                                    tif_val = condiciones.get("tif", "DAY").upper()
+                                    
+                                    if tif_val == "DAY":
+                                        fecha_creacion_str = est.get("fecha_creacion")
+                                        if fecha_creacion_str:
+                                            try:
+                                                # Parsear fecha de creación (ej. '2026-06-16T20:06:27.206346')
+                                                # Tomamos sólo la fecha YYYY-MM-DD
+                                                fecha_creacion_dt = datetime.fromisoformat(fecha_creacion_str)
+                                                if datetime.now().date() > fecha_creacion_dt.date():
+                                                    db.actualizar_estado_estrategia(
+                                                        estrategia_id=est["id"],
+                                                        nuevo_estado="CANCELADA"
+                                                    )
+                                                    db.registrar_evento(
+                                                        "WATCHDOG_ENTRADA_EXPIRADA",
+                                                        f"Estrategia ID {est['id']} ({ticker}) marcada como CANCELADA por expiración (orden DAY del día anterior no encontrada)."
+                                                    )
+                                                    enviar_alerta_webhook(
+                                                        titulo="⏰ Orden de Entrada Expirada",
+                                                        mensaje=f"**ID Estrategia:** {est['id']}\n**Ticker:** {ticker}\n**OrderID:** {oid}\nLa orden no se ejecutó y expiró al finalizar el día.",
+                                                        color="warning"
+                                                    )
+                                            except Exception as ex_exp:
+                                                print(f"[WATCHDOG ENTRADAS] Error al evaluar expiración temporal de ID {est['id']}: {ex_exp}")
+                                    elif tif_val == "GTC":
+                                        # Si es GTC y ya no está activa ni en sesión, asumimos que fue cancelada por desconexión o manualmente.
+                                        db.actualizar_estado_estrategia(
+                                            estrategia_id=est["id"],
+                                            nuevo_estado="CANCELADA"
+                                        )
+                                        db.registrar_evento(
+                                            "WATCHDOG_ENTRADA_NO_ENCONTRADA_GTC",
+                                            f"Estrategia ID {est['id']} ({ticker}) marcada como CANCELADA (orden GTC no encontrada en el bróker)."
+                                        )
+                                        enviar_alerta_webhook(
+                                            titulo="⚠️ Orden GTC Cancelada/No Encontrada",
+                                            mensaje=f"**ID Estrategia:** {est['id']}\n**Ticker:** {ticker}\n**OrderID:** {oid}\nLa orden GTC no se encontró en el bróker y se ha marcado como CANCELADA.",
+                                            color="warning"
+                                        )
+                            except Exception as ex_status:
+                                print(f"[WATCHDOG ENTRADAS] Error al obtener estado de orden {oid} para ID {est['id']}: {ex_status}")
+
+                        # 1c. Procesar estrategias en estado PENDIENTE_ENTRADA
                         for est in pendientes:
                             if stop_event.is_set():
                                 break
+                            if est.get("estado") != "PENDIENTE_ENTRADA":
+                                continue
                             ticker = est["ticker"]
                             tipo_activo = est["tipo_activo"]
                             condiciones = est["condiciones_entrada"]
@@ -91,66 +248,121 @@ def watchdog_entradas_worker(db_name, interval, stop_event, broker=None):
                                 precio_actual=precio_actual
                             )
                             
-                            if evaluacion["autorizado"]:
+                            if evaluar_condiciones_entrada := evaluacion["autorizado"]:
                                 print(f"[WATCHDOG ENTRADAS] Condiciones CUMPLIDAS para Estrategia ID {est['id']} ({ticker})")
                                 
                                 # Enviar orden genérica
                                 try:
+                                    condiciones = est.get("condiciones_entrada") or {}
+                                    tif_val = condiciones.get("tif", "DAY")
                                     res_orden = broker.enviar_orden_generica(
                                         ticker=ticker,
                                         tipo_activo=tipo_activo,
                                         patas=est["patas"],
-                                        precio_limite=precio_entrada_target
+                                        precio_limite=precio_entrada_target,
+                                        tif=tif_val
                                     )
                                     
                                     oid = res_orden["order_id"]
                                     status = res_orden["status"]
                                     
                                     # Si la orden se transmite con éxito
-                                    # Nota: Usamos el precio de entrada target o el actual
-                                    pr_entrada = precio_entrada_target if precio_entrada_target is not None else precio_actual
+                                    # Calcular precio_entrada de control (pr_entrada)
+                                    pr_entrada = precio_entrada_target
+                                    if pr_entrada is None:
+                                        if tipo_activo in ("BAG", "OPTION"):
+                                            # Calcular prima neta teórica sumando las patas
+                                            teorico = 0.0
+                                            for p in est["patas"]:
+                                                cant = int(p.get("cantidad", 1))
+                                                px = float(p.get("precio_entrada") or 0.0)
+                                                signo = 1.0 if p.get("accion", "BUY").upper() == "SELL" else -1.0
+                                                teorico += signo * px * cant
+                                            pr_entrada = round(teorico, 2)
+                                        else:
+                                            pr_entrada = precio_actual
                                     
-                                    db.actualizar_estado_estrategia(
-                                        estrategia_id=est["id"],
-                                        nuevo_estado="ACTIVA",
-                                        order_id_entrada=oid,
-                                        precio_entrada=pr_entrada,
-                                        fecha_ejecucion=datetime.now().isoformat()
-                                    )
-                                    
-                                    db.registrar_evento(
-                                        "WATCHDOG_ENTRADA_EJECUTADA",
-                                        f"Estrategia ID {est['id']} ({ticker}) activada. OrderID: {oid}. Estado: {status}"
-                                    )
-                                    
-                                    # Alerta Webhook
-                                    enviar_alerta_webhook(
-                                        titulo="🚀 Estrategia Lanzada por Watchdog",
-                                        mensaje=f"**ID Estrategia:** {est['id']}\n**Ticker:** {ticker}\n**Tipo Activo:** {tipo_activo}\n**Precio/Prima Entrada:** {pr_entrada}$\n**OrderID:** {oid}\n**Estado Orden:** {status}",
-                                        color="success"
-                                    )
-                                    
-                                    # Si es de tipo STOCK y la gestión de salida es en el bróker, colocamos SL y TP allí de inmediato
-                                    if tipo_activo == "STOCK" and est.get("condiciones_salida", {}).get("gestion") == "Gestionado por IBKR (Órdenes en Broker)":
-                                        try:
-                                            res_prot = broker.enviar_ordenes_proteccion_ibkr(
-                                                ticker=ticker,
-                                                accion_entrada=est["patas"][0]["accion"],
-                                                cantidad=est["patas"][0]["cantidad"],
-                                                precio_entrada=pr_entrada,
-                                                stop_loss_usd=est["condiciones_salida"].get("stop_loss"),
-                                                take_profit_usd=est["condiciones_salida"].get("take_profit")
-                                            )
-                                            db.registrar_evento(
-                                                "IBKR_PROTECTION_ORDERS_SENT",
-                                                f"Enviadas órdenes de protección en bróker para Estrategia #{est['id']}. Detalles: {res_prot}"
-                                            )
-                                        except Exception as ex_prot:
-                                            db.registrar_evento(
-                                                "IBKR_PROTECTION_ORDERS_ERROR",
-                                                f"Error al enviar órdenes de protección en bróker para Estrategia #{est['id']}: {ex_prot}"
-                                            )
-                                    
+                                    # Si la orden se llena inmediatamente (ej. Mocks de pruebas)
+                                    if status in ("Filled", "Submitted (Mock Defensa TFG)", "Filled (Mock Cierre TFG)") or "Mock" in str(status) or "Filled" in str(status):
+                                        db.actualizar_estado_estrategia(
+                                            estrategia_id=est["id"],
+                                            nuevo_estado="ACTIVA",
+                                            order_id_entrada=oid,
+                                            precio_entrada=pr_entrada,
+                                            fecha_ejecucion=datetime.now().isoformat()
+                                        )
+                                        
+                                        db.registrar_evento(
+                                            "WATCHDOG_ENTRADA_EJECUTADA",
+                                            f"Estrategia ID {est['id']} ({ticker}) activada inmediatamente. OrderID: {oid}. Estado: {status}"
+                                        )
+                                        
+                                        # Alerta Webhook
+                                        enviar_alerta_webhook(
+                                            titulo="🚀 Estrategia Lanzada y Activada por Watchdog",
+                                            mensaje=f"**ID Estrategia:** {est['id']}\n**Ticker:** {ticker}\n**Tipo Activo:** {tipo_activo}\n**Precio/Prima Entrada:** {pr_entrada}$\n**OrderID:** {oid}\n**Estado Orden:** {status}",
+                                            color="success"
+                                        )
+                                        
+                                        # Si es de tipo STOCK y la gestión de salida es en el bróker, colocamos SL y TP allí de inmediato
+                                        if tipo_activo == "STOCK" and est.get("condiciones_salida", {}).get("gestion") == "Gestionado por IBKR (Órdenes en Broker)":
+                                            try:
+                                                res_prot = broker.enviar_ordenes_proteccion_ibkr(
+                                                    ticker=ticker,
+                                                    accion_entrada=est["patas"][0]["accion"],
+                                                    cantidad=est["patas"][0]["cantidad"],
+                                                    precio_entrada=pr_entrada,
+                                                    stop_loss_usd=est["condiciones_salida"].get("stop_loss"),
+                                                    take_profit_usd=est["condiciones_salida"].get("take_profit")
+                                                )
+                                                db.registrar_evento(
+                                                    "IBKR_PROTECTION_ORDERS_SENT",
+                                                    f"Enviadas órdenes de protección en bróker para Estrategia #{est['id']}. Detalles: {res_prot}"
+                                                )
+                                            except Exception as ex_prot:
+                                                db.registrar_evento(
+                                                    "IBKR_PROTECTION_ORDERS_ERROR",
+                                                    f"Error al enviar órdenes de protección en bróker para Estrategia #{est['id']}: {ex_prot}"
+                                                )
+                                    elif status in ("Cancelled", "Inactive", "Rejected") or "Cancelled" in str(status) or "Rejected" in str(status):
+                                        # Si la orden es rechazada o cancelada inmediatamente por el bróker
+                                        db.actualizar_estado_estrategia(
+                                            estrategia_id=est["id"],
+                                            nuevo_estado="CANCELADA",
+                                            order_id_entrada=oid,
+                                            precio_entrada=pr_entrada,
+                                            fecha_ejecucion=datetime.now().isoformat()
+                                        )
+                                        db.registrar_evento(
+                                            "WATCHDOG_ENTRADA_CANCELADA",
+                                            f"Estrategia ID {est['id']} ({ticker}) rechazada/cancelada inmediatamente por el bróker. OrderID: {oid}. Estado: {status}"
+                                        )
+                                        enviar_alerta_webhook(
+                                            titulo="⚠️ Orden de Estrategia Rechazada/Cancelada",
+                                            mensaje=f"**ID Estrategia:** {est['id']}\n**Ticker:** {ticker}\n**Tipo Activo:** {tipo_activo}\n**OrderID:** {oid}\n**Estado Orden:** {status}",
+                                            color="warning"
+                                        )
+                                    else:
+                                        # Si la orden queda pendiente/trabajando en el mercado (TWS real), pasa a ORDEN_ENVIADA
+                                        db.actualizar_estado_estrategia(
+                                            estrategia_id=est["id"],
+                                            nuevo_estado="ORDEN_ENVIADA",
+                                            order_id_entrada=oid,
+                                            precio_entrada=pr_entrada,
+                                            fecha_ejecucion=datetime.now().isoformat()
+                                        )
+                                        
+                                        db.registrar_evento(
+                                            "WATCHDOG_ENTRADA_ENVIADA",
+                                            f"Estrategia ID {est['id']} ({ticker}) enviada al mercado. Esperando confirmación de ejecución (Fill). OrderID: {oid}. Estado: {status}"
+                                        )
+                                        
+                                        # Alerta Webhook
+                                        enviar_alerta_webhook(
+                                            titulo="📥 Orden de Estrategia Enviada al Mercado",
+                                            mensaje=f"**ID Estrategia:** {est['id']}\n**Ticker:** {ticker}\n**Tipo Activo:** {tipo_activo}\n**Prima Entrada Objetivo:** {pr_entrada}$\n**OrderID:** {oid}\n**Estado actual:** {status}",
+                                            color="info"
+                                        )
                                 except Exception as ex_orden:
                                     db.registrar_evento(
                                         "WATCHDOG_ENTRADA_ERROR_ORDEN",

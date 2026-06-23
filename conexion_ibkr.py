@@ -530,7 +530,7 @@ class GestorIBKR:
         bag.comboLegs = legs
         return bag
 
-    def enviar_orden_generica(self, ticker, tipo_activo, patas, precio_limite=None):
+    def enviar_orden_generica(self, ticker, tipo_activo, patas, precio_limite=None, tif='DAY'):
         """
         Envía una orden al mercado (Stock simple, opción simple o combo BAG de N-patas) usando la conexión activa.
         Soporta el "Modo Mock Defensa TFG" si las definiciones de contratos fallan.
@@ -560,27 +560,34 @@ class GestorIBKR:
                     cantidad = int(pata.get("cantidad", 1))
                     
                     if precio_limite is not None:
-                        orden = LimitOrder(action=accion, totalQuantity=cantidad, lmtPrice=round(precio_limite, 2))
+                        orden = LimitOrder(action=accion, totalQuantity=cantidad, lmtPrice=round(precio_limite, 2), tif=tif)
                     else:
-                        orden = MarketOrder(action=accion, totalQuantity=cantidad)
+                        orden = MarketOrder(action=accion, totalQuantity=cantidad, tif=tif)
                         
                     trade = self.ib.placeOrder(contrato, orden)
                 else:
                     # Combo Multileg (BAG)
                     bag = self.construir_contrato_bag_dinamico(ticker, contratos, patas)
                     
-                    lmt_price = round(precio_limite, 2) if precio_limite is not None else 0.0
+                    lmt_price = round(precio_limite, 2) if precio_limite is not None else None
                     
-                    # Regla de Interactive Brokers: si es combo a crédito (precio positivo de cobro),
-                    # para una orden BUY, el precio límite se especifica negativo.
-                    if lmt_price > 0:
+                    if lmt_price is not None:
+                        # Regla de Interactive Brokers: El precio límite para la orden BUY en TWS
+                        # es el opuesto al neto de la UI (crédito = negativo, débito = positivo).
+                        # Por lo tanto: tws_lmt_price = -ui_lmt_price
                         lmt_price = -lmt_price
-                        
-                    orden = LimitOrder(
-                        action='BUY',
-                        totalQuantity=1,
-                        lmtPrice=lmt_price
-                    )
+                        orden = LimitOrder(
+                            action='BUY',
+                            totalQuantity=1,
+                            lmtPrice=lmt_price,
+                            tif=tif
+                        )
+                    else:
+                        orden = MarketOrder(
+                            action='BUY',
+                            totalQuantity=1,
+                            tif=tif
+                        )
                     trade = self.ib.placeOrder(bag, orden)
 
                 self.ib.sleep(1) # Espera de confirmación inicial
@@ -592,6 +599,36 @@ class GestorIBKR:
         except Exception as e:
             print(f"Error al enviar orden genérica: {e}")
             raise
+
+    def obtener_estado_orden(self, order_id):
+        """
+        Consulta el estado y precio de ejecución de una orden específica por su ID.
+        Retorna un diccionario con {'status': ..., 'avg_fill_price': ...} o None si no se encuentra.
+        """
+        if not self.esta_conectado():
+            if not self.conectar():
+                return None
+        try:
+            def _query():
+                # Buscar en órdenes abiertas activas
+                for t in self.ib.openTrades():
+                    if t.order.orderId == order_id:
+                        return {
+                            "status": t.orderStatus.status,
+                            "avg_fill_price": t.orderStatus.avgFillPrice
+                        }
+                # Buscar en el historial de trades de la sesión
+                for t in self.ib.trades():
+                    if t.order.orderId == order_id:
+                        return {
+                            "status": t.orderStatus.status,
+                            "avg_fill_price": t.orderStatus.avgFillPrice
+                        }
+                return None
+            return self._run_sync_in_loop(_query)
+        except Exception as e:
+            print(f"Error al consultar estado de orden {order_id}: {e}")
+            return None
 
     def enviar_orden_cierre_generica(self, ticker, tipo_activo, patas, precio_cierre=None):
         """
