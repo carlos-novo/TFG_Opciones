@@ -2333,8 +2333,8 @@ with tabs[2]:
         pata["precio_entrada"] = premium_bs
         
         # Sincronizar explícitamente st.session_state para evitar caché obsoleto en campos deshabilitados
-        st.session_state[f"leg_p_{idx}"] = float(pata["precio_entrada"])
-        st.session_state[f"leg_v_{idx}"] = opt_vencimiento_str
+        leg_p_key = f"leg_p_{idx}_{pata['strike']}_{pata['right']}_{opt_vencimiento_str}"
+        st.session_state[leg_p_key] = float(pata["precio_entrada"])
         
         # Mostrar la prima como campo de solo lectura (deshabilitado)
         col_prem.number_input(
@@ -2342,17 +2342,19 @@ with tabs[2]:
             min_value=0.0, 
             value=float(pata["precio_entrada"]), 
             step=0.05, 
-            key=f"leg_p_{idx}",
+            key=leg_p_key,
             disabled=True,
             label_visibility="collapsed"
         )
         
         # 6. Vencimiento deshabilitado (solo lectura) vinculado al vencimiento global
         pata["vencimiento"] = opt_vencimiento_str
+        leg_v_key = f"leg_v_{idx}_{opt_vencimiento_str}"
+        st.session_state[leg_v_key] = opt_vencimiento_str
         col_venc.text_input(
             f"Venc. #{idx+1}", 
             value=opt_vencimiento_str, 
-            key=f"leg_v_{idx}",
+            key=leg_v_key,
             disabled=True,
             label_visibility="collapsed"
         )
