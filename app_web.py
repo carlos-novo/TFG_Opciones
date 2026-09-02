@@ -2208,9 +2208,9 @@ with tabs[2]:
             )
             st.session_state["precio_subyacente_opt"] = precio_ref
             
-        step = 1.0 if precio_ref < 50 else (2.5 if precio_ref < 200 else 5.0)
+        step = 1.0 if precio_ref < 100 else (2.5 if precio_ref < 500 else 5.0)
         centro = round(precio_ref / step) * step
-        strikes_simulados = [centro + i * step for i in range(-10, 11)]
+        strikes_simulados = [round(centro + i * step, 2) for i in range(-12, 13)]
         
         cadenas = {exp: strikes_simulados for exp in fridays}
 
@@ -2320,13 +2320,14 @@ with tabs[2]:
         days_to_exp = (venc_date - date.today()).days
         T_calc = max(days_to_exp, 1) / 365.0
         
-        # Calcular la prima usando Black-Scholes (r=0.04, sigma=0.20)
+        # Calcular la prima usando Black-Scholes (usando la volatilidad del slider o 20% por defecto)
+        sigma_calc = float(st.session_state.get("opt_vol_sim", 20)) / 100.0 if st.session_state.get("opt_vol_sim") else 0.20
         premium_bs = MotorBlackScholes.calcular_prima_bs(
             S=precio_ref_calc,
             K=float(pata["strike"]),
             T=T_calc,
             r=0.04,
-            sigma=0.20,
+            sigma=sigma_calc,
             tipo=pata["right"]
         )
         premium_bs = max(0.0, premium_bs)
