@@ -2473,6 +2473,17 @@ with tabs[2]:
         
         T_years = max(dias_sim / 365.0, 1e-5)
         
+        # Sincronizar las primas de entrada de las patas con la volatilidad (vol_sim) y tasa (tasa_sim) seleccionadas
+        for pata in st.session_state["patas_opciones"]:
+            pata["precio_entrada"] = MotorBlackScholes.calcular_prima_bs(
+                S=precio_ref_calc,
+                K=float(pata["strike"]),
+                T=T_calc,
+                r=tasa_sim,
+                sigma=vol_sim,
+                tipo=pata["right"]
+            )
+            
         # Calculamos curvas
         payoff_data = MotorBlackScholes.calcular_payoff_estrategia(
             patas=st.session_state["patas_opciones"],
