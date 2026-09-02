@@ -2350,7 +2350,7 @@ with tabs[2]:
         pata["precio_entrada"] = premium_bs
         
         # Sincronizar explícitamente st.session_state para evitar caché obsoleto en campos deshabilitados
-        leg_p_key = f"leg_p_{idx}_{pata['strike']}_{pata['right']}_{opt_vencimiento_str}"
+        leg_p_key = f"leg_p_{idx}_{pata['strike']}_{pata['right']}_{opt_vencimiento_str}_{sigma_calc}"
         st.session_state[leg_p_key] = float(pata["precio_entrada"])
         
         # Mostrar la prima como campo de solo lectura (deshabilitado)
