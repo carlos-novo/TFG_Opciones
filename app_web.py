@@ -2166,15 +2166,31 @@ with tabs[2]:
 
     # Generar fallback/simulado si no hay conexión o no se obtuvo cadena
     if not cadenas:
-        # Próximos 4 viernes
+        # Generar próximos 11 vencimientos (semanales y mensuales a 5 meses vista)
         import datetime
         from datetime import date, timedelta
-        fridays = []
+        exp_dates = []
         d = date.today()
-        while len(fridays) < 4:
+        while len(exp_dates) < 8:
             d += timedelta(days=1)
-            if d.weekday() == 4: # Friday
-                fridays.append(d.strftime("%Y-%m-%d"))
+            if d.weekday() == 4: # Viernes
+                exp_dates.append(d.strftime("%Y-%m-%d"))
+        for m_offset in range(1, 5):
+            future_month = (date.today().month + m_offset - 1) % 12 + 1
+            future_year = date.today().year + (date.today().month + m_offset - 1) // 12
+            f_date = date(future_year, future_month, 1)
+            friday_count = 0
+            while friday_count < 3:
+                if f_date.weekday() == 4:
+                    friday_count += 1
+                    if friday_count == 3:
+                        ds = f_date.strftime("%Y-%m-%d")
+                        if ds not in exp_dates:
+                            exp_dates.append(ds)
+                        break
+                f_date += timedelta(days=1)
+        exp_dates.sort()
+        fridays = exp_dates
         
         # Calcular strikes simulados
         precio_ref = st.session_state.get("precio_subyacente_opt")
