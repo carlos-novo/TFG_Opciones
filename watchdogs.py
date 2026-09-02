@@ -63,10 +63,25 @@ def watchdog_entradas_worker(db_name, interval, stop_event, broker=None):
                                 except Exception as ex_exp:
                                     print(f"[WATCHDOG ENTRADAS] Error al evaluar expiración offline de ID {est['id']}: {ex_exp}")
 
-                if pendientes or enviadas:
+                candidatas_rec = []
+                try:
+                    candidatas_rec = [
+                        e for e in db.obtener_estrategias()
+                        if e["estado"] in ("ORDEN_ENVIADA", "CANCELADA")
+                    ]
+                except Exception as e_cnd:
+                    print(f"[WATCHDOG ENTRADAS] Error al buscar candidatas de reconciliación: {e_cnd}")
+
+                if pendientes or enviadas or candidatas_rec:
                     # Nos conectamos a IBKR solo si hay tareas (o si ya está conectado en modo compartido)
                     if (es_compartido and broker.esta_conectado()) or (not es_compartido and broker.conectar()):
                         conectado = True
+                        
+                        # Reconciliación con la cartera real
+                        try:
+                            reconciliar_estrategias_con_cartera(db, broker)
+                        except Exception as ex_rec:
+                            print(f"[WATCHDOG ENTRADAS] Error al reconciliar cartera: {ex_rec}")
                         
                         # 1b. Procesar estrategias en estado ORDEN_ENVIADA
                         for est in enviadas:
@@ -660,3 +675,111 @@ def detener_watchdogs():
     """
     stop_entradas.set()
     stop_salidas.set()
+
+
+def reconciliar_estrategias_con_cartera(db, broker):
+    """
+    Reconcilia las estrategias en la base de datos con las posiciones reales en la cartera de IBKR.
+    Si una estrategia en estado 'ORDEN_ENVIADA' o 'CANCELADA' tiene posiciones reales correspondientes
+    en el bróker (porque la orden se ejecutó con el software inactivo), transiciona su estado a 'ACTIVA'
+    y actualiza su precio de entrada con el precio medio de la cartera.
+    """
+    import json
+    # 1. Obtener posiciones reales de la cartera
+    posiciones = broker.obtener_posiciones_cartera()
+    if not posiciones:
+        return
+        
+    # 2. Obtener estrategias que podrían haber sido ejecutadas (por ejemplo, 'ORDEN_ENVIADA' o 'CANCELADA')
+    try:
+        estrategias_candidatas = [
+            e for e in db.obtener_estrategias() 
+            if e["estado"] in ("ORDEN_ENVIADA", "CANCELADA")
+        ]
+    except Exception as e:
+        print(f"[RECONCILIACIÓN] Error al obtener estrategias para reconciliación: {e}")
+        return
+
+    for est in estrategias_candidatas:
+        ticker = est["ticker"]
+        tipo_activo = est["tipo_activo"]
+        patas = est.get("patas") or []
+        if not patas and est.get("patas_json"):
+            try:
+                patas = json.loads(est["patas_json"])
+            except:
+                continue
+                
+        if not patas:
+            continue
+            
+        # Comprobar si hay una posición coincidente en la cartera
+        coincide = False
+        avg_cost_accum = 0.0
+        
+        # Para STOCK
+        if tipo_activo.upper() == "STOCK":
+            for pos in posiciones:
+                if pos.get("Tipo") in ("Acción", "STK", "Stock", "IND") and pos.get("Símbolo", "").upper() == ticker.upper():
+                    qty_leg = float(patas[0].get("cantidad", 1))
+                    if patas[0].get("accion", "BUY").upper() == "SELL":
+                        qty_leg = -qty_leg
+                        
+                    qty_pos = float(pos.get("Posición", 0.0))
+                    if (qty_leg > 0 and qty_pos > 0) or (qty_leg < 0 and qty_pos < 0):
+                        coincide = True
+                        avg_cost_accum = float(pos.get("Precio Medio", 0.0))
+                        break
+        # Para OPCIÓN o BAG
+        else:
+            patas_coincidentes = 0
+            total_avg_cost = 0.0
+            for leg in patas:
+                leg_right = leg.get("right", "C")[0].upper() if leg.get("right") else "C"
+                leg_strike = float(leg.get("strike", 0.0))
+                
+                def normalizar_fecha(f_str):
+                    if not f_str: return ""
+                    cleaned = str(f_str).replace("-", "").replace("/", "").strip()
+                    if len(cleaned) == 8: return f"{cleaned[:4]}-{cleaned[4:6]}-{cleaned[6:]}"
+                    return cleaned
+                
+                leg_venc = normalizar_fecha(leg.get("vencimiento", ""))
+                
+                for pos in posiciones:
+                    if pos.get("Tipo") in ("Opción", "OPT", "Option") and pos.get("Símbolo", "").upper() == ticker.upper():
+                        pos_right = pos.get("Right (C/P)", "C")[0].upper() if pos.get("Right (C/P)") else "C"
+                        pos_strike = float(pos.get("Strike", 0.0))
+                        pos_venc = normalizar_fecha(pos.get("Vencimiento", ""))
+                        
+                        if pos_right == leg_right and pos_strike == leg_strike and pos_venc == leg_venc:
+                            qty_leg = float(leg.get("cantidad", 1))
+                            if leg.get("accion", "BUY").upper() == "SELL":
+                                qty_leg = -qty_leg
+                            qty_pos = float(pos.get("Posición", 0.0))
+                            
+                            if (qty_leg > 0 and qty_pos > 0) or (qty_leg < 0 and qty_pos < 0):
+                                patas_coincidentes += 1
+                                total_avg_cost += float(pos.get("Precio Medio", 0.0))
+                                break
+            
+            if len(patas) > 0 and patas_coincidentes == len(patas):
+                coincide = True
+                avg_cost_accum = total_avg_cost / len(patas)
+
+        if coincide:
+            print(f"[RECONCILIACIÓN] ¡Estrategia #{est['id']} ({ticker}) reconciliada con éxito! Activando...")
+            db.actualizar_estado_estrategia(
+                estrategia_id=est["id"],
+                nuevo_estado="ACTIVA",
+                precio_entrada=avg_cost_accum
+            )
+            db.registrar_evento(
+                "RECONCILIACION_POSICION_EJECUTADA",
+                f"Estrategia ID {est['id']} ({ticker}) sincronizada y activada automáticamente a partir de la cartera física de IBKR. Coste medio: {avg_cost_accum}$"
+            )
+            enviar_alerta_webhook(
+                titulo="🚀 Estrategia Activada por Reconciliación",
+                mensaje=f"**ID Estrategia:** {est['id']}\n**Ticker:** {ticker}\n**Tipo Activo:** {tipo_activo}\n**Precio Entrada (Cartera):** {avg_cost_accum}$\nSincronizada automáticamente tras detectar la ejecución en la cartera física de IBKR.",
+                color="success"
+            )

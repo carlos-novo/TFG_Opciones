@@ -182,10 +182,108 @@ def confirmar_y_ejecutar_venta_global(simbolo, tipo, qty, total_mercado, pnl, po
         st.session_state.liq_amount_final = None
         st.session_state.liq_radio_final = None
         st.session_state.liq_success_toast = f"Orden de liquidación de {qty_a_vender} posiciones en {simbolo} enviada con éxito."
-        st.rerun()
     except Exception as ex_liq:
         st.session_state.liq_error = f"Error al liquidar posición: {ex_liq}"
         st.session_state.liq_confirm = True
+
+def obtener_posiciones_huerfanas():
+    """
+    Identifica las posiciones en la cartera del broker que no están asociadas
+    a ninguna estrategia activa en la base de datos local.
+    Agrupa acciones por símbolo y descarta posiciones netas que suman cero.
+    """
+    posiciones = st.session_state.get('posiciones_cartera', [])
+    if not posiciones:
+        return []
+    
+    # 1. Agrupar acciones de la misma forma que en el dashboard
+    raw_acciones = [p for p in posiciones if p.get('Tipo') in ('Acción', 'STK', 'Stock', 'IND')]
+    acciones_agrupadas = {}
+    for p in raw_acciones:
+        sym = p.get('Símbolo')
+        qty = p.get('Posición', 0.0)
+        avg_p = p.get('Precio Medio', 0.0)
+        mkt_val = p.get('Valor Mercado', 0.0)
+        pnl = p.get('P&L No Real.', 0.0)
+        
+        if sym not in acciones_agrupadas:
+            acciones_agrupadas[sym] = {
+                "Símbolo": sym,
+                "Tipo": p.get("Tipo"),
+                "Posición": 0.0,
+                "Valor Mercado": 0.0,
+                "P&L No Real.": 0.0,
+                "Costo Total": 0.0
+            }
+        acciones_agrupadas[sym]["Posición"] += qty
+        acciones_agrupadas[sym]["Valor Mercado"] += mkt_val
+        acciones_agrupadas[sym]["P&L No Real."] += pnl
+        acciones_agrupadas[sym]["Costo Total"] += avg_p * qty
+        
+    for sym, data in acciones_agrupadas.items():
+        if data["Posición"] != 0:
+            data["Precio Medio"] = round(data["Costo Total"] / data["Posición"], 4)
+        else:
+            data["Precio Medio"] = 0.0
+        data.pop("Costo Total", None)
+        
+    # Filtrar acciones con posición real (neta) distinta de cero
+    acciones_list = [data for data in acciones_agrupadas.values() if abs(data["Posición"]) > 1e-5]
+    
+    # Filtrar opciones con posición real distinta de cero
+    opciones_list = [p for p in posiciones if p.get('Tipo') in ('Opción', 'OPT', 'Option') and abs(p.get('Posición', 0.0)) > 1e-5]
+    
+    # Unificar posiciones activas
+    posiciones_activas = acciones_list + opciones_list
+    
+    try:
+        estrategias_activas = db.obtener_estrategias(estado="ACTIVA")
+    except Exception as e_db:
+        print(f"Error al obtener estrategias activas para huérfanas: {e_db}")
+        estrategias_activas = []
+        
+    huerfanas = []
+    for pos in posiciones_activas:
+        simbolo = pos.get('Símbolo')
+        tipo = pos.get('Tipo')
+        tipo_act_sel = "OPTION" if tipo in ("Opción", "OPT", "Option") else "STOCK"
+        
+        tiene_estrategia = False
+        for e in estrategias_activas:
+            if e.get("ticker", "").upper() == simbolo.upper():
+                if tipo_act_sel == "STOCK" and e.get("tipo_activo", "").upper() == "STOCK":
+                    tiene_estrategia = True
+                    break
+                elif tipo_act_sel == "OPTION" and e.get("tipo_activo", "").upper() in ("BAG", "OPTION"):
+                    patas = e.get("patas") or []
+                    if not patas and e.get("patas_json"):
+                        try:
+                            patas = json.loads(e["patas_json"])
+                        except:
+                            pass
+                    for pata in patas:
+                        if pata.get("tipo_activo", "OPTION").upper() == "OPTION":
+                            p_right = pata.get("right", "C")[0].upper()
+                            pos_right = pos.get("Right (C/P)", "C")[0].upper()
+                            
+                            def normalizar_fecha(f_str):
+                                if not f_str: return ""
+                                cleaned = str(f_str).replace("-", "").replace("/", "").strip()
+                                if len(cleaned) == 8: return f"{cleaned[:4]}-{cleaned[4:6]}-{cleaned[6:]}"
+                                return cleaned
+                            
+                            p_venc = normalizar_fecha(pata.get("vencimiento", ""))
+                            pos_venc = normalizar_fecha(pos.get("Vencimiento", ""))
+                            
+                            if float(pata.get("strike", 0.0)) == float(pos.get("Strike", 0.0)) and p_right == pos_right and p_venc == pos_venc:
+                                tiene_estrategia = True
+                                break
+                    if tiene_estrategia:
+                        break
+        if not tiene_estrategia:
+            huerfanas.append(pos)
+    return huerfanas
+
 
 @st_dialog("Detalle de Posición")
 def mostrar_detalle_posicion(pos):
@@ -399,15 +497,17 @@ def mostrar_detalle_posicion(pos):
 
     for i, d in enumerate(dates):
         base_signed = 0.0
+        qty_signed = 0.0
         for leg in active_legs_history:
             if leg["entry_date"] <= d and (leg["close_date"] is None or leg["close_date"] > d):
                 base_signed += leg["qty"] * leg["entry_price"] * leg["multiplier"]
+                qty_signed += leg["qty"]
         
         # Guardamos en valor absoluto para que la exposición/capital invertido sea siempre positiva e intuitiva
         base_invertida_series.append(abs(base_signed))
         
-        # El Valor Mercado (Línea Azul) debe marcar siempre el valor de mercado de la acción (escalado a la posición actual), no solo cuando se poseía
-        valor_mercado_series.append(abs(position_size) * simulated_prices[i] * multiplier)
+        # El Valor Mercado (Línea Azul) debe marcar el valor de mercado histórico real de la posición en ese momento
+        valor_mercado_series.append(abs(qty_signed) * simulated_prices[i] * multiplier)
 
     # Forzar el último día para sincronizarlo al 100% con los datos exactos del bróker (KPI cards)
     if len(dates) > 0:
@@ -1243,8 +1343,14 @@ if 'broker' not in st.session_state:
 if 'posiciones_cartera' not in st.session_state:
     st.session_state['posiciones_cartera'] = None
 
+if 'show_cotizacion_dialog' not in st.session_state:
+    st.session_state['show_cotizacion_dialog'] = False
+
+if 'show_detalle_pos' not in st.session_state:
+    st.session_state['show_detalle_pos'] = None
+
 # --- DIÁLOGO DE CONSULTA DE COTIZACIONES (POPUP MODAL) ---
-@st.dialog("Consultar Cotización")
+@st_dialog("Consultar Cotización")
 def mostrar_dialogo_cotizacion():
     st.markdown("<p style='color:#94a3b8; font-size:0.95rem; margin-top:-10px;'>Consulta la cotización en tiempo real o retardada de cualquier ticker en Interactive Brokers.</p>", unsafe_allow_html=True)
     ticker_test = st.text_input(
@@ -1256,8 +1362,8 @@ def mostrar_dialogo_cotizacion():
     ).upper()
     
     if st.button("Consultar", use_container_width=True, type="primary"):
-        conectado = st.session_state.broker.esta_conectado()
-        if conectado:
+        conectado_ib = st.session_state.broker.esta_conectado()
+        if conectado_ib:
             with st.spinner("Consultando en IBKR..."):
                 try:
                     precio = st.session_state.broker.obtener_precio_prueba(ticker_test)
@@ -1287,6 +1393,8 @@ def mostrar_dialogo_cotizacion():
                 mock_p = 150.00
             st.info(f"💡 [Modo Offline] Precio simulado de **{ticker_test}**: **${mock_p:.2f}**")
 
+
+
 # --- BARRA DE HERRAMIENTAS SUPERIOR (TOP TOOLBAR) ---
 conectado = st.session_state.broker.esta_conectado()
 color_est = "🟢" if conectado else "🔴"
@@ -1314,7 +1422,8 @@ with st.container(key="top_toolbar_container"):
 
     with col_cot:
         if st.button("Consultar Precio", use_container_width=True, key="btn_top_cot"):
-            mostrar_dialogo_cotizacion()
+            st.session_state["show_cotizacion_dialog"] = True
+            st.rerun()
 
     with col_conn:
         if st.button(f"{color_est} {texto_est}", use_container_width=True, key="btn_top_conn"):
@@ -1333,6 +1442,16 @@ with st.container(key="top_toolbar_container"):
 
 st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
 
+# --- DETECCIÓN E INVOCACIÓN DE DIÁLOGOS MODALES ---
+if st.session_state.get("show_cotizacion_dialog"):
+    st.session_state["show_cotizacion_dialog"] = False
+    mostrar_dialogo_cotizacion()
+
+if st.session_state.get("show_detalle_pos") is not None:
+    temp_pos = st.session_state["show_detalle_pos"]
+    st.session_state["show_detalle_pos"] = None
+    mostrar_detalle_posicion(temp_pos)
+
 tabs = st.tabs(["Dashboard", "Acciones", "Opciones", "Control Room"])
 
 # ==========================================
@@ -1349,7 +1468,10 @@ with tabs[0]:
             last_summary_fetch = st.session_state.get('last_summary_fetch_time', 0)
             if st.session_state.get('datos_cuenta') is None or (now - last_summary_fetch) >= 14:
                 with st.spinner("Sincronizando cuenta con IBKR..."):
-                    st.session_state['datos_cuenta'] = st.session_state.broker.obtener_resumen_cuenta()
+                    datos_res = st.session_state.broker.obtener_resumen_cuenta()
+                    if datos_res:
+                        st.session_state['datos_cuenta'] = datos_res
+                        db.guardar_cache("datos_cuenta", datos_res)
                     st.session_state['last_summary_fetch_time'] = now
             datos_cuenta = st.session_state.get('datos_cuenta')
             if datos_cuenta:
@@ -1359,8 +1481,14 @@ with tabs[0]:
             else:
                 net_liq, buying_power, daily_pnl = 1000000.0, 5000000.0, 0.0
         else:
-            # Mocks realistas para simulación/defensa (basados en las capturas del usuario)
-            net_liq, buying_power, daily_pnl = 1004910.68, 6670487.46, 0.0
+            # Intentar leer desde el caché de sesión de la base de datos
+            datos_cache = db.obtener_cache("datos_cuenta")
+            if datos_cache:
+                net_liq = float(datos_cache.get('NetLiquidation', 1004910.68))
+                buying_power = float(datos_cache.get('BuyingPower', 6670487.46))
+                daily_pnl = float(datos_cache.get('DailyPnL', 0.0))
+            else:
+                net_liq, buying_power, daily_pnl = 1004910.68, 6670487.46, 0.0
             
         # 2. Sincronizar posiciones
         now = time.time()
@@ -1368,21 +1496,75 @@ with tabs[0]:
         
         if conectado:
             if st.session_state.get('posiciones_cartera') is None or (now - last_fetch) >= 14:
-                st.session_state['posiciones_cartera'] = st.session_state.broker.obtener_posiciones_cartera()
+                pos_cartera = st.session_state.broker.obtener_posiciones_cartera()
+                if pos_cartera is not None:
+                    st.session_state['posiciones_cartera'] = pos_cartera
+                    db.guardar_cache("posiciones_cartera", pos_cartera)
                 st.session_state['last_portfolio_fetch_time'] = now
+                
+                # Reconciliar la base de datos con las posiciones reales del bróker
+                try:
+                    from watchdogs import reconciliar_estrategias_con_cartera
+                    reconciliar_estrategias_con_cartera(db, st.session_state.broker)
+                except Exception as ex_rec_ui:
+                    print(f"Error en reconciliación automática desde UI: {ex_rec_ui}")
         else:
             if st.session_state.get('posiciones_cartera') is None:
-                # Mock que se alinea con la captura enviada por el usuario
-                st.session_state['posiciones_cartera'] = [
-                    {"Símbolo": "AAPL", "Tipo": "STK", "Vencimiento": "—", "Strike": "—", "Right (C/P)": "—", "Posición": 51, "Precio Medio": 307.3475, "Valor Mercado": 14927.19, "P&L No Real.": -747.53},
-                    {"Símbolo": "BBVA", "Tipo": "STK", "Vencimiento": "—", "Strike": "—", "Right (C/P)": "—", "Posición": 1, "Precio Medio": 23.81, "Valor Mercado": 19.42, "P&L No Real.": -4.39},
-                    {"Símbolo": "BBVA", "Tipo": "STK", "Vencimiento": "—", "Strike": "—", "Right (C/P)": "—", "Posición": 1, "Precio Medio": 24.3309, "Valor Mercado": 22.39, "P&L No Real.": -1.94},
-                    {"Símbolo": "SPX", "Tipo": "Opción", "Vencimiento": "20260611", "Strike": 7220.0, "Right (C/P)": "P", "Posición": 1, "Precio Medio": 11.6164, "Valor Mercado": 620.0, "P&L No Real.": -541.64},
-                    {"Símbolo": "SPX", "Tipo": "Opción", "Vencimiento": "20260611", "Strike": 7230.0, "Right (C/P)": "P", "Posición": 1, "Precio Medio": 12.9164, "Valor Mercado": 740.0, "P&L No Real.": -551.64},
-                    {"Símbolo": "SPX", "Tipo": "Opción", "Vencimiento": "20260611", "Strike": 7240.0, "Right (C/P)": "P", "Posición": -1, "Precio Medio": 15.2836, "Valor Mercado": -860.0, "P&L No Real.": 668.36}
-                ]
+                posiciones_cache = db.obtener_cache("posiciones_cartera")
+                if posiciones_cache:
+                    st.session_state['posiciones_cartera'] = posiciones_cache
+                else:
+                    # Mock fallback secundario si nunca ha habido una conexión exitosa
+                    st.session_state['posiciones_cartera'] = [
+                        {"Símbolo": "AAPL", "Tipo": "STK", "Vencimiento": "—", "Strike": "—", "Right (C/P)": "—", "Posición": 51, "Precio Medio": 307.3475, "Valor Mercado": 14927.19, "P&L No Real.": -747.53},
+                        {"Símbolo": "SPX", "Tipo": "Opción", "Vencimiento": "20260611", "Strike": 7220.0, "Right (C/P)": "P", "Posición": 1, "Precio Medio": 11.6164, "Valor Mercado": 620.0, "P&L No Real.": -541.64},
+                        {"Símbolo": "SPX", "Tipo": "Opción", "Vencimiento": "20260611", "Strike": 7230.0, "Right (C/P)": "P", "Posición": 1, "Precio Medio": 12.9164, "Valor Mercado": 740.0, "P&L No Real.": -551.64},
+                        {"Símbolo": "SPX", "Tipo": "Opción", "Vencimiento": "20260611", "Strike": 7240.0, "Right (C/P)": "P", "Posición": -1, "Precio Medio": 15.2836, "Valor Mercado": -860.0, "P&L No Real.": 668.36}
+                    ]
                 
-        posiciones = st.session_state.get('posiciones_cartera', [])
+        posiciones_raw = st.session_state.get('posiciones_cartera', [])
+        
+        # Agrupar y netear posiciones para evitar mostrar activos liquidados (con posición neta cero)
+        posiciones_agrupadas = {}
+        for pos in posiciones_raw:
+            tipo = pos.get('Tipo')
+            if tipo in ('Opción', 'OPT', 'Option'):
+                # Agrupar opciones por contrato único
+                key = (pos.get('Símbolo'), pos.get('Vencimiento'), pos.get('Strike'), pos.get('Right (C/P)'), 'OPTION')
+            else:
+                # Agrupar acciones por símbolo
+                key = (pos.get('Símbolo'), '—', '—', '—', 'STOCK')
+                
+            if key not in posiciones_agrupadas:
+                posiciones_agrupadas[key] = {
+                    "Símbolo": pos.get('Símbolo'),
+                    "Tipo": tipo,
+                    "Vencimiento": pos.get('Vencimiento'),
+                    "Strike": pos.get('Strike'),
+                    "Right (C/P)": pos.get('Right (C/P)'),
+                    "Posición": 0.0,
+                    "Valor Mercado": 0.0,
+                    "P&L No Real.": 0.0,
+                    "Costo Total": 0.0
+                }
+            
+            qty = float(pos.get('Posición', 0.0))
+            avg_p = float(pos.get('Precio Medio', 0.0))
+            posiciones_agrupadas[key]["Posición"] += qty
+            posiciones_agrupadas[key]["Valor Mercado"] += float(pos.get('Valor Mercado', 0.0))
+            posiciones_agrupadas[key]["P&L No Real."] += float(pos.get('P&L No Real.', 0.0))
+            posiciones_agrupadas[key]["Costo Total"] += avg_p * qty
+
+        posiciones = []
+        for key, p_data in posiciones_agrupadas.items():
+            if abs(p_data["Posición"]) > 1e-5:
+                # Calcular el precio medio ponderado
+                if p_data["Posición"] != 0:
+                    p_data["Precio Medio"] = round(p_data["Costo Total"] / p_data["Posición"], 4)
+                else:
+                    p_data["Precio Medio"] = 0.0
+                p_data.pop("Costo Total", None)
+                posiciones.append(p_data)
         
         # 3. Cálculos de Portfolio
         total_mkt_val = sum(pos.get('Valor Mercado', 0.0) for pos in posiciones)
@@ -1567,7 +1749,6 @@ with tabs[0]:
             ticker_exposure = {
                 "AAPL": 14927.19,
                 "SPX": 2220.00,
-                "BBVA": 41.81,
                 "TSLA": 8500.00,
                 "NVDA": 12400.00
             }
@@ -1660,9 +1841,9 @@ with tabs[0]:
                 data["Precio Medio"] = 0.0
             data.pop("Costo Total", None)
             
-        acciones_list = list(acciones_agrupadas.values())
+        acciones_list = [data for data in acciones_agrupadas.values() if abs(data["Posición"]) > 1e-5]
         
-        opciones_list = [p for p in posiciones if p.get('Tipo') in ('Opción', 'OPT', 'Option')]
+        opciones_list = [p for p in posiciones if p.get('Tipo') in ('Opción', 'OPT', 'Option') and abs(p.get('Posición', 0.0)) > 1e-5]
         
         def render_seccion_activos(titulo, lista_activos):
             st.subheader(titulo)
@@ -1712,7 +1893,8 @@ with tabs[0]:
                             )
                         with c_btn:
                             if st.button("🔍", key=f"btn_details_{titulo}_{safe_sym}_{idx}", use_container_width=True):
-                                mostrar_detalle_posicion(pos)
+                                st.session_state["show_detalle_pos"] = pos
+                                st.rerun()
             st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
             
         render_seccion_activos("Acciones", acciones_list)
@@ -1809,11 +1991,18 @@ with tabs[1]:
 
     # Funciones de campos para tarjetas de salida (Acciones)
     def fields_acc_sl_tp(disabled):
+        c_chk1, c_chk2, _ = st.columns(3)
+        act_sl = c_chk1.checkbox("Activar Stop Loss", value=True, key="acc_sl_active", disabled=disabled)
+        act_tp = c_chk2.checkbox("Activar Take Profit", value=True, key="acc_tp_active", disabled=disabled)
+        
         c1, c2, c3 = st.columns(3)
-        stop_loss_acc = c1.number_input("Stop Loss ($)", value=-200.0, step=10.0, key="acc_sl_val", disabled=disabled)
-        take_profit_acc = c2.number_input("Take Profit ($)", value=400.0, step=10.0, key="acc_tp_val", disabled=disabled)
+        sl_disabled = disabled or not act_sl
+        tp_disabled = disabled or not act_tp
+        
+        stop_loss_acc = c1.number_input("Stop Loss ($)", value=-200.0, step=10.0, key="acc_sl_val", disabled=sl_disabled)
+        take_profit_acc = c2.number_input("Take Profit ($)", value=400.0, step=10.0, key="acc_tp_val", disabled=tp_disabled)
         dest_gestion = c3.selectbox("Gestión", ["App (Watchdog)", "IBKR (Broker)"], key="acc_gestion_sl_tp", disabled=disabled)
-        return stop_loss_acc, take_profit_acc, dest_gestion
+        return act_sl, stop_loss_acc, act_tp, take_profit_acc, dest_gestion
 
     def fields_acc_vix_salida(disabled):
         vix_max_acc = st.number_input("VIX Máximo", min_value=1.0, value=30.0, step=0.5, key="acc_vix_max", disabled=disabled)
@@ -1833,7 +2022,7 @@ with tabs[1]:
     col1, col2 = st.columns(2)
     with col1:
         act_sl_tp, vals_sl_tp = render_watchdog_card("Stop Loss / Take Profit", "acc_act_sl_tp", fields_acc_sl_tp)
-        stop_loss_acc, take_profit_acc, dest_gestion = vals_sl_tp if vals_sl_tp else (-200.0, 400.0, "App (Watchdog)")
+        act_sl_acc, stop_loss_acc, act_tp_acc, take_profit_acc, dest_gestion = vals_sl_tp if vals_sl_tp else (True, -200.0, True, 400.0, "App (Watchdog)")
         
         act_sma_salida, vals_sma_salida = render_watchdog_card("Cerrar por SMA", "acc_act_sma_salida", fields_acc_sma_salida)
         sma_per_sal, sma_reg_sal = vals_sma_salida if vals_sma_salida else (200, "Precio < SMA")
@@ -1870,9 +2059,12 @@ with tabs[1]:
                 
             cond_salida = {}
             if act_sl_tp:
-                cond_salida["stop_loss"] = float(stop_loss_acc)
-                cond_salida["take_profit"] = float(take_profit_acc)
-                cond_salida["gestion"] = dest_gestion
+                if act_sl_acc:
+                    cond_salida["stop_loss"] = float(stop_loss_acc)
+                if act_tp_acc:
+                    cond_salida["take_profit"] = float(take_profit_acc)
+                if act_sl_acc or act_tp_acc:
+                    cond_salida["gestion"] = dest_gestion
             if act_vix_salida:
                 cond_salida["vix_maximo"] = float(vix_max_acc)
             if act_sma_salida:
@@ -1920,10 +2112,10 @@ with tabs[2]:
     if "patas_opciones" not in st.session_state:
         # Pre-cargar un Iron Condor de muestra para impresionar
         st.session_state["patas_opciones"] = [
-            {"tipo_activo": "OPTION", "accion": "BUY", "cantidad": 1, "strike": 90.0, "right": "P", "vencimiento": date.today(), "precio_entrada": 1.50},
-            {"tipo_activo": "OPTION", "accion": "SELL", "cantidad": 1, "strike": 95.0, "right": "P", "vencimiento": date.today(), "precio_entrada": 3.20},
-            {"tipo_activo": "OPTION", "accion": "SELL", "cantidad": 1, "strike": 105.0, "right": "C", "vencimiento": date.today(), "precio_entrada": 2.80},
-            {"tipo_activo": "OPTION", "accion": "BUY", "cantidad": 1, "strike": 110.0, "right": "C", "vencimiento": date.today(), "precio_entrada": 1.10}
+            {"tipo_activo": "OPTION", "accion": "BUY", "cantidad": 1, "strike": 90.0, "right": "P", "vencimiento": date.today().strftime("%Y-%m-%d"), "precio_entrada": 1.50},
+            {"tipo_activo": "OPTION", "accion": "SELL", "cantidad": 1, "strike": 95.0, "right": "P", "vencimiento": date.today().strftime("%Y-%m-%d"), "precio_entrada": 3.20},
+            {"tipo_activo": "OPTION", "accion": "SELL", "cantidad": 1, "strike": 105.0, "right": "C", "vencimiento": date.today().strftime("%Y-%m-%d"), "precio_entrada": 2.80},
+            {"tipo_activo": "OPTION", "accion": "BUY", "cantidad": 1, "strike": 110.0, "right": "C", "vencimiento": date.today().strftime("%Y-%m-%d"), "precio_entrada": 1.10}
         ]
         
     opt_ticker = st.text_input("Ticker Subyacente Opciones", value="SPY").upper()
@@ -1936,6 +2128,10 @@ with tabs[2]:
 
     if opt_ticker != st.session_state["opt_ticker_previo"]:
         st.session_state["opt_ticker_previo"] = opt_ticker
+        # Limpiar claves temporales leg_ para evitar conflictos de cache al cambiar subyacente
+        for key in list(st.session_state.keys()):
+            if key.startswith("leg_"):
+                del st.session_state[key]
         if st.session_state.broker.esta_conectado():
             try:
                 with st.spinner(f"Consultando cotización actual de {opt_ticker}..."):
@@ -1948,6 +2144,91 @@ with tabs[2]:
                 st.session_state["precio_subyacente_opt"] = None
         else:
             st.session_state["precio_subyacente_opt"] = None
+
+    # Obtener cadenas de opciones reales o simuladas con caché para evitar lentitud
+    if "cache_cadenas_opciones" not in st.session_state:
+        st.session_state["cache_cadenas_opciones"] = {}
+        
+    cadenas = {}
+    conectado = st.session_state.broker.esta_conectado()
+    if conectado:
+        if opt_ticker in st.session_state["cache_cadenas_opciones"]:
+            cadenas = st.session_state["cache_cadenas_opciones"][opt_ticker]
+        else:
+            try:
+                with st.spinner("Cargando cadenas de opciones reales desde IBKR..."):
+                    cadenas = st.session_state.broker.obtener_cadenas_opciones_ibkr(opt_ticker)
+                    if cadenas:
+                        st.session_state["cache_cadenas_opciones"][opt_ticker] = cadenas
+            except Exception as e_opt:
+                print(f"Error al obtener cadena de opciones real: {e_opt}")
+                cadenas = {}
+
+    # Generar fallback/simulado si no hay conexión o no se obtuvo cadena
+    if not cadenas:
+        # Próximos 4 viernes
+        import datetime
+        from datetime import date, timedelta
+        fridays = []
+        d = date.today()
+        while len(fridays) < 4:
+            d += timedelta(days=1)
+            if d.weekday() == 4: # Friday
+                fridays.append(d.strftime("%Y-%m-%d"))
+        
+        # Calcular strikes simulados
+        precio_ref = st.session_state.get("precio_subyacente_opt")
+        if precio_ref is None:
+            # Buscar en posiciones si tenemos el ticker
+            posiciones_cartera = st.session_state.get("posiciones_cartera", [])
+            if posiciones_cartera:
+                for pos in posiciones_cartera:
+                    if pos.get("Símbolo", "").upper() == opt_ticker.upper():
+                        pos_qty = float(pos.get("Posición", 0))
+                        pos_val = float(pos.get("Valor Mercado", 0))
+                        if pos_qty != 0:
+                            mult = 100.0 if pos.get("Tipo") == "Opción" else 1.0
+                            precio_ref = abs(pos_val) / (abs(pos_qty) * mult)
+                            break
+            if precio_ref is None:
+                strikes_patas = [float(p.get("strike", 0)) for p in st.session_state["patas_opciones"] if float(p.get("strike", 0)) > 0]
+                if strikes_patas:
+                    precio_ref = float(sum(strikes_patas) / len(strikes_patas))
+                else:
+                    precio_ref = 100.0 # Fallback general
+                
+        # Si está offline, permitir especificar el precio del subyacente para simular
+        if not conectado:
+            precio_ref = st.number_input(
+                "Precio Subyacente Simulado ($)", 
+                min_value=0.01, 
+                value=float(precio_ref), 
+                step=1.0, 
+                key="opt_precio_simulado"
+            )
+            st.session_state["precio_subyacente_opt"] = precio_ref
+            
+        step = 1.0 if precio_ref < 50 else (2.5 if precio_ref < 200 else 5.0)
+        centro = round(precio_ref / step) * step
+        strikes_simulados = [centro + i * step for i in range(-10, 11)]
+        
+        cadenas = {exp: strikes_simulados for exp in fridays}
+
+    expirations = sorted(list(cadenas.keys()))
+    if expirations:
+        val_default = expirations[0]
+        if "opt_global_vencimiento" in st.session_state and st.session_state["opt_global_vencimiento"] in expirations:
+            val_default = st.session_state["opt_global_vencimiento"]
+        opt_vencimiento_str = st.selectbox(
+            "Selecciona la Fecha de Vencimiento de la Estrategia", 
+            options=expirations, 
+            index=expirations.index(val_default),
+            key="opt_global_vencimiento"
+        )
+    else:
+        opt_vencimiento_str = date.today().strftime("%Y-%m-%d")
+        
+    strikes_disponibles = sorted([float(s) for s in cadenas.get(opt_vencimiento_str, [100.0])])
     
     st.subheader("Configuración de las Patas (Legs)")
     
@@ -1990,15 +2271,27 @@ with tabs[2]:
         if right_opt:
             pata["right"] = "C" if right_opt == "CALL" else "P"
             
-        # 3. Strike Input (Label collapsed)
-        pata["strike"] = col_strike.number_input(
-            f"Strike #{idx+1}", 
-            min_value=0.1, 
-            value=float(pata["strike"]), 
-            step=1.0, 
+        # 3. Strike Selectbox (Label collapsed)
+        try:
+            current_strike_val = float(pata["strike"])
+        except:
+            current_strike_val = strikes_disponibles[len(strikes_disponibles)//2]
+            
+        # Encontrar el índice del strike actual en strikes_disponibles
+        if current_strike_val in strikes_disponibles:
+            strike_idx = strikes_disponibles.index(current_strike_val)
+        else:
+            # Encontrar el más cercano
+            strike_idx = min(range(len(strikes_disponibles)), key=lambda i: abs(strikes_disponibles[i] - current_strike_val))
+            
+        pata_strike_val = col_strike.selectbox(
+            f"Strike #{idx+1}",
+            options=strikes_disponibles,
+            index=strike_idx,
             key=f"leg_k_{idx}",
             label_visibility="collapsed"
         )
+        pata["strike"] = pata_strike_val
         
         # 4. Ratio/Quantity Input (Label collapsed)
         pata["cantidad"] = col_qty.number_input(
@@ -2010,27 +2303,57 @@ with tabs[2]:
             label_visibility="collapsed"
         )
         
-        # 5. Prima Input (Label collapsed)
-        pata["precio_entrada"] = col_prem.number_input(
+        # 5. Calcular Prima Teórica (Black-Scholes) y fijar automáticamente
+        precio_ref_calc = st.session_state.get("precio_subyacente_opt")
+        if precio_ref_calc is None or precio_ref_calc <= 0:
+            # Inferir precio spot aproximado del promedio de los strikes si no hay cotización activa
+            strikes_patas = [float(p.get("strike", 0)) for p in st.session_state["patas_opciones"] if float(p.get("strike", 0)) > 0]
+            if strikes_patas:
+                precio_ref_calc = float(sum(strikes_patas) / len(strikes_patas))
+            else:
+                precio_ref_calc = 100.0
+            
+        try:
+            venc_date = datetime.strptime(opt_vencimiento_str, "%Y-%m-%d").date()
+        except Exception:
+            venc_date = date.today()
+        days_to_exp = (venc_date - date.today()).days
+        T_calc = max(days_to_exp, 1) / 365.0
+        
+        # Calcular la prima usando Black-Scholes (r=0.04, sigma=0.20)
+        premium_bs = MotorBlackScholes.calcular_prima_bs(
+            S=precio_ref_calc,
+            K=float(pata["strike"]),
+            T=T_calc,
+            r=0.04,
+            sigma=0.20,
+            tipo=pata["right"]
+        )
+        premium_bs = max(0.0, premium_bs)
+        pata["precio_entrada"] = premium_bs
+        
+        # Sincronizar explícitamente st.session_state para evitar caché obsoleto en campos deshabilitados
+        st.session_state[f"leg_p_{idx}"] = float(pata["precio_entrada"])
+        st.session_state[f"leg_v_{idx}"] = opt_vencimiento_str
+        
+        # Mostrar la prima como campo de solo lectura (deshabilitado)
+        col_prem.number_input(
             f"Prima #{idx+1}", 
-            min_value=0.01, 
+            min_value=0.0, 
             value=float(pata["precio_entrada"]), 
             step=0.05, 
             key=f"leg_p_{idx}",
+            disabled=True,
             label_visibility="collapsed"
         )
         
-        # 6. Vencimiento (Label collapsed)
-        venc_val = pata["vencimiento"]
-        if isinstance(venc_val, str):
-            try:
-                venc_val = datetime.strptime(venc_val, "%Y-%m-%d").date()
-            except:
-                venc_val = date.today()
-        pata["vencimiento"] = col_venc.date_input(
+        # 6. Vencimiento deshabilitado (solo lectura) vinculado al vencimiento global
+        pata["vencimiento"] = opt_vencimiento_str
+        col_venc.text_input(
             f"Venc. #{idx+1}", 
-            value=venc_val, 
+            value=opt_vencimiento_str, 
             key=f"leg_v_{idx}",
+            disabled=True,
             label_visibility="collapsed"
         )
         
@@ -2042,6 +2365,10 @@ with tabs[2]:
     if patas_eliminar:
         for index in sorted(patas_eliminar, reverse=True):
             st.session_state["patas_opciones"].pop(index)
+        # Limpiar claves leg_ para que no haya desalineación de índices en session_state
+        for key in list(st.session_state.keys()):
+            if key.startswith("leg_"):
+                del st.session_state[key]
         st.rerun()
         
     # Añadir nueva pata
@@ -2050,7 +2377,7 @@ with tabs[2]:
         if st.session_state["patas_opciones"]:
             nueva_pata = st.session_state["patas_opciones"][-1].copy()
         else:
-            nueva_pata = {"tipo_activo": "OPTION", "accion": "BUY", "cantidad": 1, "strike": 100.0, "right": "C", "vencimiento": date.today(), "precio_entrada": 1.0}
+            nueva_pata = {"tipo_activo": "OPTION", "accion": "BUY", "cantidad": 1, "strike": 100.0, "right": "C", "vencimiento": opt_vencimiento_str, "precio_entrada": 1.0}
         st.session_state["patas_opciones"].append(nueva_pata)
         st.rerun()
         
@@ -2420,11 +2747,18 @@ with tabs[2]:
 
         # Funciones de campos para tarjetas de salida (Opciones)
         def fields_opt_sl_tp(disabled):
+            c_chk1, c_chk2, _ = st.columns(3)
+            act_sl = c_chk1.checkbox("Activar Stop Loss", value=True, key="opt_sl_active", disabled=disabled)
+            act_tp = c_chk2.checkbox("Activar Take Profit", value=True, key="opt_tp_active", disabled=disabled)
+            
             c1, c2, c3 = st.columns(3)
-            opt_stop_loss = c1.number_input("Stop Loss ($)", value=-300.0, step=10.0, key="opt_sl_val", disabled=disabled)
-            opt_take_profit = c2.number_input("Take Profit ($)", value=600.0, step=10.0, key="opt_tp_val", disabled=disabled)
+            sl_disabled = disabled or not act_sl
+            tp_disabled = disabled or not act_tp
+            
+            opt_stop_loss = c1.number_input("Stop Loss ($)", value=-300.0, step=10.0, key="opt_sl_val", disabled=sl_disabled)
+            opt_take_profit = c2.number_input("Take Profit ($)", value=600.0, step=10.0, key="opt_tp_val", disabled=tp_disabled)
             opt_dest_gestion = c3.selectbox("Gestión", ["App (Watchdog)", "IBKR (Broker)"], key="opt_dest_gestion", disabled=disabled)
-            return opt_stop_loss, opt_take_profit, opt_dest_gestion
+            return act_sl, opt_stop_loss, act_tp, opt_take_profit, opt_dest_gestion
 
         def fields_opt_vix_sal(disabled):
             opt_vix_max = st.number_input("VIX Máximo", min_value=1.0, value=28.0, step=0.5, key="opt_vix_max", disabled=disabled)
@@ -2444,7 +2778,7 @@ with tabs[2]:
         col1, col2 = st.columns(2)
         with col1:
             opt_act_sl_tp, vals_opt_sl_tp = render_watchdog_card("Stop Loss / Take Profit", "opt_act_sl_tp", fields_opt_sl_tp)
-            opt_stop_loss, opt_take_profit, opt_dest_gestion = vals_opt_sl_tp if vals_opt_sl_tp else (-300.0, 600.0, "App (Watchdog)")
+            opt_act_sl, opt_stop_loss, opt_act_tp, opt_take_profit, opt_dest_gestion = vals_opt_sl_tp if vals_opt_sl_tp else (True, -300.0, True, 600.0, "App (Watchdog)")
             
             opt_act_sma_sal, vals_opt_sma_sal = render_watchdog_card("Cerrar por SMA", "opt_act_sma_sal", fields_opt_sma_sal)
             opt_sma_per_sal, opt_sma_reg_sal = vals_opt_sma_sal if vals_opt_sma_sal else (200, "Precio < SMA")
@@ -2486,9 +2820,12 @@ with tabs[2]:
             # Construimos condiciones de salida
             opt_cond_sal = {}
             if opt_act_sl_tp:
-                opt_cond_sal["stop_loss"] = float(opt_stop_loss)
-                opt_cond_sal["take_profit"] = float(opt_take_profit)
-                opt_cond_sal["gestion"] = opt_dest_gestion
+                if opt_act_sl:
+                    opt_cond_sal["stop_loss"] = float(opt_stop_loss)
+                if opt_act_tp:
+                    opt_cond_sal["take_profit"] = float(opt_take_profit)
+                if opt_act_sl or opt_act_tp:
+                    opt_cond_sal["gestion"] = opt_dest_gestion
             if opt_act_vix_sal:
                 opt_cond_sal["vix_maximo"] = float(opt_vix_max)
             if opt_act_sma_sal:
@@ -2663,168 +3000,437 @@ with tabs[3]:
     
     # 2. Formulario de Mutación en Caliente (Hot-Reloading SL/TP y condiciones de salida avanzadas)
     st.subheader("Modificación de Límites en Caliente")
-    st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Modifica instantáneamente las condiciones de salida y límites de las estrategias activas. El Watchdog las cargará en su próximo ciclo de evaluación.</p>", unsafe_allow_html=True)
+    st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Modifica instantáneamente las condiciones de salida y límites de las estrategias activas o añade límites algorítmicos a posiciones huérfanas de tu cartera.</p>", unsafe_allow_html=True)
+    
+    opcion_modo = st.radio(
+        "Selecciona el modo de operación:",
+        ["Modificar condiciones de una Estrategia Activa", "Añadir condiciones a una Posición de Cartera (Huérfana)"],
+        horizontal=True,
+        key="mut_modo_operacion"
+    )
     
     todas_estrategias = db.obtener_estrategias()
     est_activas_list = [e for e in todas_estrategias if e["estado"] == "ACTIVA"]
     
-    if not est_activas_list:
-        st.info("No hay estrategias activas disponibles para modificar sus condiciones de salida.")
-    else:
-        opciones_dropdown = {f"Estrategia #{e['id']} - {e['ticker']} ({e['tipo_activo']})": e["id"] for e in est_activas_list}
-        seleccionada_label = st.selectbox("Selecciona la Estrategia Activa", list(opciones_dropdown.keys()), key="mut_select_est_dropdown")
-        est_id_select = opciones_dropdown[seleccionada_label]
-        
-        # Recuperamos la estrategia seleccionada
-        estrategia_sel = next(e for e in est_activas_list if e["id"] == est_id_select)
-        condiciones_salida_sel = estrategia_sel.get("condiciones_salida") or {}
-        
-        # Si la estrategia seleccionada ha cambiado, precargamos sus condiciones en session_state
-        ultimo_id_sel = st.session_state.get("mut_ultimo_id_sel")
-        if ultimo_id_sel != est_id_select:
-            st.session_state["mut_ultimo_id_sel"] = est_id_select
-            
-            # SL/TP
-            st.session_state["mut_act_sl_tp"] = ("stop_loss" in condiciones_salida_sel or "take_profit" in condiciones_salida_sel)
-            st.session_state["mut_sl_val"] = float(condiciones_salida_sel.get("stop_loss", -200.0))
-            st.session_state["mut_tp_val"] = float(condiciones_salida_sel.get("take_profit", 400.0))
-            st.session_state["mut_gestion_sl_tp"] = condiciones_salida_sel.get("gestion", "App (Watchdog)")
-            
-            # VIX
-            st.session_state["mut_act_vix_salida"] = ("vix_maximo" in condiciones_salida_sel)
-            st.session_state["mut_vix_max"] = float(condiciones_salida_sel.get("vix_maximo", 30.0))
-            
-            # SMA
-            sma_cfg = condiciones_salida_sel.get("sma", {})
-            st.session_state["mut_act_sma_salida"] = bool(sma_cfg.get("activo", False))
-            st.session_state["mut_sma_per_sal"] = int(sma_cfg.get("periodo", 200))
-            st.session_state["mut_sma_reg_sal"] = sma_cfg.get("regla", "Precio < SMA")
-            
-            # Hora Forzada
-            st.session_state["mut_act_hora_salida"] = ("cierre_horario" in condiciones_salida_sel)
-            st.session_state["mut_hora_sal"] = condiciones_salida_sel.get("cierre_horario", "21:45")
-            
-        # Funciones de campos para render_watchdog_card
-        def fields_mut_sl_tp(disabled):
-            c1, c2, c3 = st.columns(3)
-            sl_val = c1.number_input("Stop Loss ($)", value=float(st.session_state.get("mut_sl_val", -200.0)), step=10.0, key="mut_sl_val_widget", disabled=disabled)
-            tp_val = c2.number_input("Take Profit ($)", value=float(st.session_state.get("mut_tp_val", 400.0)), step=10.0, key="mut_tp_val_widget", disabled=disabled)
-            
-            gest_val_current = st.session_state.get("mut_gestion_sl_tp", "App (Watchdog)")
-            gest_idx = 0 if gest_val_current == "App (Watchdog)" else 1
-            gest_val = c3.selectbox("Gestión", ["App (Watchdog)", "IBKR (Broker)"], index=gest_idx, key="mut_gestion_sl_tp_widget", disabled=disabled)
-            
-            st.session_state["mut_sl_val"] = sl_val
-            st.session_state["mut_tp_val"] = tp_val
-            st.session_state["mut_gestion_sl_tp"] = gest_val
-            return sl_val, tp_val, gest_val
-
-        def fields_mut_vix_salida(disabled):
-            vix_val = st.number_input(
-                "VIX Máximo",
-                min_value=1.0,
-                value=float(st.session_state.get("mut_vix_max", 30.0)),
-                step=0.5,
-                key="mut_vix_max_widget",
-                disabled=disabled
-            )
-            st.session_state["mut_vix_max"] = vix_val
-            return vix_val
-
-        def fields_mut_sma_salida(disabled):
-            c1, c2 = st.columns(2)
-            sma_per = c1.number_input(
-                "Periodo SMA",
-                min_value=5,
-                value=int(st.session_state.get("mut_sma_per_sal", 200)),
-                step=5,
-                key="mut_sma_per_sal_widget",
-                disabled=disabled
-            )
-            reg_val_current = st.session_state.get("mut_sma_reg_sal", "Precio < SMA")
-            reg_idx = 0 if reg_val_current == "Precio < SMA" else 1
-            sma_reg = c2.selectbox(
-                "Regla",
-                ["Precio < SMA", "Precio > SMA"],
-                index=reg_idx,
-                key="mut_sma_reg_sal_widget",
-                disabled=disabled
-            )
-            st.session_state["mut_sma_per_sal"] = sma_per
-            st.session_state["mut_sma_reg_sal"] = sma_reg
-            return sma_per, sma_reg
-
-        def fields_mut_hora_salida(disabled):
-            hora_val = st.text_input(
-                "Hora Cierre",
-                value=st.session_state.get("mut_hora_sal", "21:45"),
-                key="mut_hora_sal_widget",
-                disabled=disabled
-            )
-            st.session_state["mut_hora_sal"] = hora_val
-            return hora_val
-
-        # Renderizar en Grid 2x2
-        col_m1, col_m2 = st.columns(2)
-        with col_m1:
-            act_sl_tp, _ = render_watchdog_card("Stop Loss / Take Profit", "mut_act_sl_tp", fields_mut_sl_tp)
-            act_sma, _ = render_watchdog_card("Cerrar por SMA", "mut_act_sma_salida", fields_mut_sma_salida)
-            
-        with col_m2:
-            act_vix, _ = render_watchdog_card("Cerrar por VIX", "mut_act_vix_salida", fields_mut_vix_salida)
-            act_hora, _ = render_watchdog_card("Hora Forzada", "mut_act_hora_salida", fields_mut_hora_salida)
-            
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("💾 Actualizar Condiciones de Salida", type="primary", key="btn_update_mut_conditions"):
-            # Construir el diccionario de condiciones modificado
-            cond_salida = {}
-            if st.session_state.get("mut_act_sl_tp"):
-                cond_salida["stop_loss"] = float(st.session_state.get("mut_sl_val", -200.0))
-                cond_salida["take_profit"] = float(st.session_state.get("mut_tp_val", 400.0))
-                cond_salida["gestion"] = st.session_state.get("mut_gestion_sl_tp", "App (Watchdog)")
-            if st.session_state.get("mut_act_vix_salida"):
-                cond_salida["vix_maximo"] = float(st.session_state.get("mut_vix_max", 30.0))
-            if st.session_state.get("mut_act_sma_salida"):
-                cond_salida["sma"] = {
-                    "activo": True,
-                    "periodo": int(st.session_state.get("mut_sma_per_sal", 200)),
-                    "regla": st.session_state.get("mut_sma_reg_sal", "Precio < SMA")
-                }
-            if st.session_state.get("mut_act_hora_salida"):
-                cond_salida["cierre_horario"] = st.session_state.get("mut_hora_sal", "21:45")
+    if opcion_modo == "Modificar condiciones de una Estrategia Activa":
+        if not est_activas_list:
+            st.info("No hay estrategias activas disponibles para modificar sus condiciones de salida.")
+        else:
+            opciones_dropdown = {}
+            for e in est_activas_list:
+                label = e['ticker']
+                if label in opciones_dropdown:
+                    label = f"{e['ticker']} ({e['tipo_activo']})"
+                if label in opciones_dropdown:
+                    label = f"{e['ticker']} #{e['id']}"
+                opciones_dropdown[label] = e["id"]
                 
-            try:
-                res_mut = db.actualizar_condiciones_salida(estrategia_id=est_id_select, condiciones_salida=cond_salida)
-                if res_mut:
-                    st.success("¡Condiciones de salida actualizadas con éxito! El Watchdog las cargará en su siguiente ciclo.")
-                    db.registrar_evento("MUTACION_LIMITES_UI", f"Modificados límites/condiciones en caliente para #{est_id_select}. Cond: {cond_salida}")
-                    
-                    # Formatear el mensaje del webhook de forma descriptiva
-                    msg_parts = []
-                    if "stop_loss" in cond_salida:
-                        msg_parts.append(f"**Stop Loss:** {cond_salida['stop_loss']}$")
-                        msg_parts.append(f"**Take Profit:** {cond_salida['take_profit']}$")
-                        msg_parts.append(f"**Gestión:** {cond_salida['gestion']}")
-                    if "vix_maximo" in cond_salida:
-                        msg_parts.append(f"**VIX Máximo:** {cond_salida['vix_maximo']}")
-                    if "sma" in cond_salida:
-                        msg_parts.append(f"**Cerrar por SMA:** Periodo {cond_salida['sma']['periodo']} ({cond_salida['sma']['regla']})")
-                    if "cierre_horario" in cond_salida:
-                        msg_parts.append(f"**Hora Forzada:** {cond_salida['cierre_horario']}")
-                        
-                    enviar_alerta_webhook(
-                        titulo="🔄 Condiciones de Salida Modificadas en Caliente",
-                        mensaje=f"**ID Estrategia:** {est_id_select}\n" + "\n".join(msg_parts),
-                        color="warning"
+            seleccionada_label = st.selectbox("Selecciona el Ticker a modificar", list(opciones_dropdown.keys()), key="mut_select_est_dropdown")
+            est_id_select = opciones_dropdown[seleccionada_label]
+            
+            # Recuperamos la estrategia seleccionada
+            estrategia_sel = next(e for e in est_activas_list if e["id"] == est_id_select)
+            condiciones_salida_sel = estrategia_sel.get("condiciones_salida") or {}
+            
+            # Calcular la cantidad actual de la estrategia
+            patas_sel = estrategia_sel.get("patas") or []
+            if not patas_sel and estrategia_sel.get("patas_json"):
+                try:
+                    patas_sel = json.loads(estrategia_sel["patas_json"])
+                except:
+                    pass
+            cant_actual = sum(abs(float(p.get("cantidad", 1.0))) for p in patas_sel)
+            
+            c_cant1, c_cant2 = st.columns(2)
+            with c_cant1:
+                radio_cant = st.radio(
+                    "¿A cuántas posiciones aplicar la modificación?",
+                    ["Todas las posiciones", "Parte de las posiciones"],
+                    index=0,
+                    key="mut_radio_cant_tipo"
+                )
+            with c_cant2:
+                if radio_cant == "Todas las posiciones":
+                    qty_a_mutar = st.number_input(
+                        "Posiciones / Contratos",
+                        value=cant_actual,
+                        disabled=True,
+                        key="mut_qty_final_widget"
                     )
-                    st.session_state["mut_ultimo_id_sel"] = None
-                    time.sleep(0.5)
-                    st.rerun()
                 else:
-                    st.error("No se pudo actualizar los límites de la estrategia.")
-            except Exception as e:
-                st.error(f"Error al mutar límites: {e}")
+                    qty_a_mutar = st.number_input(
+                        "Posiciones / Contratos",
+                        min_value=0.01,
+                        max_value=cant_actual,
+                        value=cant_actual,
+                        step=1.0 if cant_actual.is_integer() else 0.01,
+                        key="mut_qty_final_widget"
+                    )
+            
+            # Si la estrategia seleccionada ha cambiado, precargamos sus condiciones en session_state
+            ultimo_id_sel = st.session_state.get("mut_ultimo_id_sel")
+            if ultimo_id_sel != est_id_select:
+                st.session_state["mut_ultimo_id_sel"] = est_id_select
                 
+                # SL/TP
+                st.session_state["mut_act_sl_tp"] = ("stop_loss" in condiciones_salida_sel or "take_profit" in condiciones_salida_sel)
+                st.session_state["mut_sl_active"] = ("stop_loss" in condiciones_salida_sel)
+                st.session_state["mut_tp_active"] = ("take_profit" in condiciones_salida_sel)
+                st.session_state["mut_sl_val"] = float(condiciones_salida_sel.get("stop_loss", -200.0))
+                st.session_state["mut_tp_val"] = float(condiciones_salida_sel.get("take_profit", 400.0))
+                st.session_state["mut_gestion_sl_tp"] = condiciones_salida_sel.get("gestion", "App (Watchdog)")
+                
+                # VIX
+                st.session_state["mut_act_vix_salida"] = ("vix_maximo" in condiciones_salida_sel)
+                st.session_state["mut_vix_max"] = float(condiciones_salida_sel.get("vix_maximo", 30.0))
+                
+                # SMA
+                sma_cfg = condiciones_salida_sel.get("sma", {})
+                st.session_state["mut_act_sma_salida"] = bool(sma_cfg.get("activo", False))
+                st.session_state["mut_sma_per_sal"] = int(sma_cfg.get("periodo", 200))
+                st.session_state["mut_sma_reg_sal"] = sma_cfg.get("regla", "Precio < SMA")
+                
+                # Hora Forzada
+                st.session_state["mut_act_hora_salida"] = ("cierre_horario" in condiciones_salida_sel)
+                st.session_state["mut_hora_sal"] = condiciones_salida_sel.get("cierre_horario", "21:45")
+                
+            # Funciones de campos para render_watchdog_card
+            def fields_mut_sl_tp(disabled):
+                c_chk1, c_chk2, _ = st.columns(3)
+                act_sl = c_chk1.checkbox(
+                    "Activar Stop Loss",
+                    value=st.session_state.get("mut_sl_active", True),
+                    key="mut_sl_active_widget",
+                    disabled=disabled
+                )
+                act_tp = c_chk2.checkbox(
+                    "Activar Take Profit",
+                    value=st.session_state.get("mut_tp_active", True),
+                    key="mut_tp_active_widget",
+                    disabled=disabled
+                )
+                
+                st.session_state["mut_sl_active"] = act_sl
+                st.session_state["mut_tp_active"] = act_tp
+                
+                c1, c2, c3 = st.columns(3)
+                sl_disabled = disabled or not act_sl
+                tp_disabled = disabled or not act_tp
+                
+                sl_val = c1.number_input("Stop Loss ($)", value=float(st.session_state.get("mut_sl_val", -200.0)), step=10.0, key="mut_sl_val_widget", disabled=sl_disabled)
+                tp_val = c2.number_input("Take Profit ($)", value=float(st.session_state.get("mut_tp_val", 400.0)), step=10.0, key="mut_tp_val_widget", disabled=tp_disabled)
+                
+                gest_val_current = st.session_state.get("mut_gestion_sl_tp", "App (Watchdog)")
+                gest_idx = 0 if gest_val_current == "App (Watchdog)" else 1
+                gest_val = c3.selectbox("Gestión", ["App (Watchdog)", "IBKR (Broker)"], index=gest_idx, key="mut_gestion_sl_tp_widget", disabled=disabled)
+                
+                st.session_state["mut_sl_val"] = sl_val
+                st.session_state["mut_tp_val"] = tp_val
+                st.session_state["mut_gestion_sl_tp"] = gest_val
+                return act_sl, sl_val, act_tp, tp_val, gest_val
+    
+            def fields_mut_vix_salida(disabled):
+                vix_val = st.number_input(
+                    "VIX Máximo",
+                    min_value=1.0,
+                    value=float(st.session_state.get("mut_vix_max", 30.0)),
+                    step=0.5,
+                    key="mut_vix_max_widget",
+                    disabled=disabled
+                )
+                st.session_state["mut_vix_max"] = vix_val
+                return vix_val
+    
+            def fields_mut_sma_salida(disabled):
+                c1, c2 = st.columns(2)
+                sma_per = c1.number_input(
+                    "Periodo SMA",
+                    min_value=5,
+                    value=int(st.session_state.get("mut_sma_per_sal", 200)),
+                    step=5,
+                    key="mut_sma_per_sal_widget",
+                    disabled=disabled
+                )
+                reg_val_current = st.session_state.get("mut_sma_reg_sal", "Precio < SMA")
+                reg_idx = 0 if reg_val_current == "Precio < SMA" else 1
+                sma_reg = c2.selectbox(
+                    "Regla",
+                    ["Precio < SMA", "Precio > SMA"],
+                    index=reg_idx,
+                    key="mut_sma_reg_sal_widget",
+                    disabled=disabled
+                )
+                st.session_state["mut_sma_per_sal"] = sma_per
+                st.session_state["mut_sma_reg_sal"] = sma_reg
+                return sma_per, sma_reg
+    
+            def fields_mut_hora_salida(disabled):
+                hora_val = st.text_input(
+                    "Hora Cierre",
+                    value=st.session_state.get("mut_hora_sal", "21:45"),
+                    key="mut_hora_sal_widget",
+                    disabled=disabled
+                )
+                st.session_state["mut_hora_sal"] = hora_val
+                return hora_val
+    
+            # Renderizar en Grid 2x2
+            col_m1, col_m2 = st.columns(2)
+            with col_m1:
+                act_sl_tp, _ = render_watchdog_card("Stop Loss / Take Profit", "mut_act_sl_tp", fields_mut_sl_tp)
+                act_sma, _ = render_watchdog_card("Cerrar por SMA", "mut_act_sma_salida", fields_mut_sma_salida)
+                
+            with col_m2:
+                act_vix, _ = render_watchdog_card("Cerrar por VIX", "mut_act_vix_salida", fields_mut_vix_salida)
+                act_hora, _ = render_watchdog_card("Hora Forzada", "mut_act_hora_salida", fields_mut_hora_salida)
+                
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("💾 Actualizar Condiciones de Salida", type="primary", key="btn_update_mut_conditions"):
+                # Construir el diccionario de condiciones modificado
+                cond_salida = {}
+                if st.session_state.get("mut_act_sl_tp"):
+                    if st.session_state.get("mut_sl_active"):
+                        cond_salida["stop_loss"] = float(st.session_state.get("mut_sl_val", -200.0))
+                    if st.session_state.get("mut_tp_active"):
+                        cond_salida["take_profit"] = float(st.session_state.get("mut_tp_val", 400.0))
+                    if st.session_state.get("mut_sl_active") or st.session_state.get("mut_tp_active"):
+                        cond_salida["gestion"] = st.session_state.get("mut_gestion_sl_tp", "App (Watchdog)")
+                if st.session_state.get("mut_act_vix_salida"):
+                    cond_salida["vix_maximo"] = float(st.session_state.get("mut_vix_max", 30.0))
+                if st.session_state.get("mut_act_sma_salida"):
+                    cond_salida["sma"] = {
+                        "activo": True,
+                        "periodo": int(st.session_state.get("mut_sma_per_sal", 200)),
+                        "regla": st.session_state.get("mut_sma_reg_sal", "Precio < SMA")
+                    }
+                if st.session_state.get("mut_act_hora_salida"):
+                    cond_salida["cierre_horario"] = st.session_state.get("mut_hora_sal", "21:45")
+                    
+                try:
+                    res_mut = db.actualizar_condiciones_salida(estrategia_id=est_id_select, condiciones_salida=cond_salida)
+                    if res_mut:
+                        # Si la cantidad cambió, actualizamos proporcionalmente la cantidad en las patas
+                        if abs(qty_a_mutar - cant_actual) > 1e-5:
+                            patas_actualizadas = []
+                            factor = qty_a_mutar / cant_actual if cant_actual != 0 else 1.0
+                            for pata in patas_sel:
+                                pata_nueva = pata.copy()
+                                pata_nueva["cantidad"] = float(pata.get("cantidad", 1.0)) * factor
+                                patas_actualizadas.append(pata_nueva)
+                            db.actualizar_patas(est_id_select, patas_actualizadas)
+                            
+                        st.success("¡Condiciones de salida y volumen actualizados con éxito! El Watchdog las cargará en su siguiente ciclo.")
+                        db.registrar_evento("MUTACION_LIMITES_UI", f"Modificados límites/condiciones en caliente para #{est_id_select}. Cond: {cond_salida}")
+                        
+                        # Formatear el mensaje del webhook de forma descriptiva
+                        msg_parts = []
+                        if "stop_loss" in cond_salida:
+                            msg_parts.append(f"**Stop Loss:** {cond_salida['stop_loss']}$")
+                            msg_parts.append(f"**Take Profit:** {cond_salida['take_profit']}$")
+                            msg_parts.append(f"**Gestión:** {cond_salida['gestion']}")
+                        if "vix_maximo" in cond_salida:
+                            msg_parts.append(f"**VIX Máximo:** {cond_salida['vix_maximo']}")
+                        if "sma" in cond_salida:
+                            msg_parts.append(f"**Cerrar por SMA:** Periodo {cond_salida['sma']['periodo']} ({cond_salida['sma']['regla']})")
+                        if "cierre_horario" in cond_salida:
+                            msg_parts.append(f"**Hora Forzada:** {cond_salida['cierre_horario']}")
+                            
+                        enviar_alerta_webhook(
+                            titulo="🔄 Condiciones de Salida Modificadas en Caliente",
+                            mensaje=f"**ID Estrategia:** {est_id_select}\n" + "\n".join(msg_parts),
+                            color="warning"
+                        )
+                        st.session_state["mut_ultimo_id_sel"] = None
+                        time.sleep(0.5)
+                        st.rerun()
+                    else:
+                        st.error("No se pudo actualizar los límites de la estrategia.")
+                except Exception as e:
+                    st.error(f"Error al mutar límites: {e}")
+                    
+    else:
+        # Añadir condiciones a una Posición de Cartera (Huérfana)
+        huerfanas = obtener_posiciones_huerfanas()
+        if not huerfanas:
+            st.info("No hay posiciones huérfanas disponibles en la cartera para asignar límites.")
+        else:
+            opciones_adop = {
+                f"{pos.get('Símbolo')} ({pos.get('Tipo')}) - Posición: {pos.get('Posición')} @ ${pos.get('Precio Medio', 0.0):.2f}": idx
+                for idx, pos in enumerate(huerfanas)
+            }
+            seleccionada_adop_label = st.selectbox("Selecciona la Posición Huérfana", list(opciones_adop.keys()), key="adop_select_huerfana_dropdown")
+            pos_idx = opciones_adop[seleccionada_adop_label]
+            pos_sel = huerfanas[pos_idx]
+            
+            # Inicializar session state para adopción si no existe o si ha cambiado el activo
+            if "adop_ultimo_key" not in st.session_state or st.session_state["adop_ultimo_key"] != seleccionada_adop_label:
+                st.session_state["adop_ultimo_key"] = seleccionada_adop_label
+                st.session_state["adop_act_sl_tp"] = False
+                st.session_state["adop_sl_active"] = True
+                st.session_state["adop_tp_active"] = True
+                st.session_state["adop_sl_val"] = -200.0
+                st.session_state["adop_tp_val"] = 400.0
+                st.session_state["adop_gestion_sl_tp"] = "App (Watchdog)"
+                st.session_state["adop_act_vix_salida"] = False
+                st.session_state["adop_vix_max"] = 30.0
+                st.session_state["adop_act_sma_salida"] = False
+                st.session_state["adop_sma_per_sal"] = 200
+                st.session_state["adop_sma_reg_sal"] = "Precio < SMA"
+                st.session_state["adop_act_hora_salida"] = False
+                st.session_state["adop_hora_sal"] = "21:45"
+            
+            max_qty_adop = abs(float(pos_sel.get("Posición", 1.0)))
+            qty_to_adopt = st.number_input(
+                "Cantidad a Monitorear",
+                min_value=0.01,
+                max_value=max_qty_adop,
+                value=max_qty_adop,
+                step=1.0 if max_qty_adop.is_integer() else 0.01,
+                key="adop_qty_to_monitor_widget"
+            )
+            
+            # Funciones de campos para adopción
+            def fields_adop_sl_tp(disabled):
+                c_chk1, c_chk2, _ = st.columns(3)
+                act_sl = c_chk1.checkbox(
+                    "Activar Stop Loss",
+                    value=st.session_state.get("adop_sl_active", True),
+                    key="adop_sl_active_widget",
+                    disabled=disabled
+                )
+                act_tp = c_chk2.checkbox(
+                    "Activar Take Profit",
+                    value=st.session_state.get("adop_tp_active", True),
+                    key="adop_tp_active_widget",
+                    disabled=disabled
+                )
+                
+                st.session_state["adop_sl_active"] = act_sl
+                st.session_state["adop_tp_active"] = act_tp
+                
+                c1, c2, c3 = st.columns(3)
+                sl_disabled = disabled or not act_sl
+                tp_disabled = disabled or not act_tp
+                
+                sl_val = c1.number_input("Stop Loss ($)", value=float(st.session_state.get("adop_sl_val", -200.0)), step=10.0, key="adop_sl_val_widget", disabled=sl_disabled)
+                tp_val = c2.number_input("Take Profit ($)", value=float(st.session_state.get("adop_tp_val", 400.0)), step=10.0, key="adop_tp_val_widget", disabled=tp_disabled)
+                
+                gest_val = c3.selectbox("Gestión", ["App (Watchdog)", "IBKR (Broker)"], index=0 if st.session_state.get("adop_gestion_sl_tp") == "App (Watchdog)" else 1, key="adop_gestion_sl_tp_widget", disabled=disabled)
+                st.session_state["adop_sl_val"] = sl_val
+                st.session_state["adop_tp_val"] = tp_val
+                st.session_state["adop_gestion_sl_tp"] = gest_val
+                return act_sl, sl_val, act_tp, tp_val, gest_val
+    
+            def fields_adop_vix_salida(disabled):
+                vix_val = st.number_input("VIX Máximo", min_value=1.0, value=float(st.session_state.get("adop_vix_max", 30.0)), step=0.5, key="adop_vix_max_widget", disabled=disabled)
+                st.session_state["adop_vix_max"] = vix_val
+                return vix_val
+    
+            def fields_adop_sma_salida(disabled):
+                c1, c2 = st.columns(2)
+                sma_per = c1.number_input("Periodo SMA", min_value=5, value=int(st.session_state.get("adop_sma_per_sal", 200)), step=5, key="adop_sma_per_sal_widget", disabled=disabled)
+                sma_reg = c2.selectbox("Regla", ["Precio < SMA", "Precio > SMA"], index=0 if st.session_state.get("adop_sma_reg_sal") == "Precio < SMA" else 1, key="adop_sma_reg_sal_widget", disabled=disabled)
+                st.session_state["adop_sma_per_sal"] = sma_per
+                st.session_state["adop_sma_reg_sal"] = sma_reg
+                return sma_per, sma_reg
+    
+            def fields_adop_hora_salida(disabled):
+                hora_val = st.text_input("Hora Cierre", value=st.session_state.get("adop_hora_sal", "21:45"), key="adop_hora_sal_widget", disabled=disabled)
+                st.session_state["adop_hora_sal"] = hora_val
+                return hora_val
+            
+            # Grid 2x2 para configurar las condiciones
+            col_a1, col_a2 = st.columns(2)
+            with col_a1:
+                act_sl_tp_adop, _ = render_watchdog_card("Stop Loss / Take Profit", "adop_act_sl_tp", fields_adop_sl_tp)
+                act_sma_adop, _ = render_watchdog_card("Cerrar por SMA", "adop_act_sma_salida", fields_adop_sma_salida)
+                
+            with col_a2:
+                act_vix_adop, _ = render_watchdog_card("Cerrar por VIX", "adop_act_vix_salida", fields_adop_vix_salida)
+                act_hora_adop, _ = render_watchdog_card("Hora Forzada", "adop_act_hora_salida", fields_adop_hora_salida)
+                
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("💾 Activar Seguimiento Algorítmico", type="primary", key="btn_save_adop_conditions"):
+                cond_salida = {}
+                if st.session_state.get("adop_act_sl_tp"):
+                    if st.session_state.get("adop_sl_active"):
+                        cond_salida["stop_loss"] = float(st.session_state.get("adop_sl_val", -200.0))
+                    if st.session_state.get("adop_tp_active"):
+                        cond_salida["take_profit"] = float(st.session_state.get("adop_tp_val", 400.0))
+                    if st.session_state.get("adop_sl_active") or st.session_state.get("adop_tp_active"):
+                        cond_salida["gestion"] = st.session_state.get("adop_gestion_sl_tp", "App (Watchdog)")
+                if st.session_state.get("adop_act_vix_salida"):
+                    cond_salida["vix_maximo"] = float(st.session_state.get("adop_vix_max", 30.0))
+                if st.session_state.get("adop_act_sma_salida"):
+                    cond_salida["sma"] = {
+                        "activo": True,
+                        "periodo": int(st.session_state.get("adop_sma_per_sal", 200)),
+                        "regla": st.session_state.get("adop_sma_reg_sal", "Precio < SMA")
+                    }
+                if st.session_state.get("adop_act_hora_salida"):
+                    cond_salida["cierre_horario"] = st.session_state.get("adop_hora_sal", "21:45")
+                
+                # Sintetizar patas correspondientes a la posición del broker
+                ticker_adop = pos_sel.get("Símbolo")
+                tipo_adop = pos_sel.get("Tipo")
+                pos_qty_real = float(pos_sel.get("Posición", 1.0))
+                accion_adop = "BUY" if pos_qty_real > 0 else "SELL"
+                
+                if tipo_adop in ("Opción", "OPT", "Option"):
+                    patas_adop = [{
+                        "tipo_activo": "OPTION",
+                        "vencimiento": pos_sel.get("Vencimiento"),
+                        "strike": pos_sel.get("Strike"),
+                        "right": pos_sel.get("Right (C/P)"),
+                        "accion": accion_adop,
+                        "cantidad": qty_to_adopt
+                    }]
+                else:
+                    patas_adop = [{
+                        "tipo_activo": "STOCK",
+                        "accion": accion_adop,
+                        "cantidad": qty_to_adopt
+                    }]
+                
+                try:
+                    # Crear estrategia activa en base de datos
+                    est_id = db.crear_estrategia(
+                        ticker=ticker_adop,
+                        tipo_activo="STOCK" if tipo_adop in ("Acción", "STK", "Stock", "IND") else "OPTION",
+                        estado="ACTIVA",
+                        patas=patas_adop,
+                        condiciones_salida=cond_salida,
+                        precio_entrada=float(pos_sel.get("Precio Medio", 0.0))
+                    )
+                    
+                    if est_id:
+                        st.success(f"¡Seguimiento algorítmico activado con éxito! Creada Estrategia #{est_id} para {ticker_adop}.")
+                        db.registrar_evento("ADOPCION_POSICION_UI", f"Adoptada posición huérfana de {ticker_adop} (cant={qty_to_adopt}) como Estrategia #{est_id} con límites: {cond_salida}")
+                        
+                        # Notificar por Discord
+                        msg_parts = [f"**Cantidad:** {qty_to_adopt}"]
+                        if "stop_loss" in cond_salida:
+                            msg_parts.append(f"**Stop Loss:** {cond_salida['stop_loss']}$")
+                            msg_parts.append(f"**Take Profit:** {cond_salida['take_profit']}$")
+                            msg_parts.append(f"**Gestión:** {cond_salida['gestion']}")
+                        if "vix_maximo" in cond_salida:
+                            msg_parts.append(f"**VIX Máximo:** {cond_salida['vix_maximo']}")
+                        if "sma" in cond_salida:
+                            msg_parts.append(f"**Cerrar por SMA:** Periodo {cond_salida['sma']['periodo']} ({cond_salida['sma']['regla']})")
+                        if "cierre_horario" in cond_salida:
+                            msg_parts.append(f"**Hora Forzada:** {cond_salida['cierre_horario']}")
+                            
+                        enviar_alerta_webhook(
+                            titulo="🚀 Posición Huérfana Adoptada como Estrategia",
+                            mensaje=f"**ID Estrategia:** {est_id}\n**Ticker:** {ticker_adop}\n" + "\n".join(msg_parts),
+                            color="success"
+                        )
+                        st.session_state["adop_ultimo_key"] = None
+                        time.sleep(0.5)
+                        st.rerun()
+                except Exception as e_adop:
+                    st.error(f"Error al adoptar posición de la cartera: {e_adop}")
+                    
     st.divider()
     
     # 3. MOCKS DE SIMULACIÓN SANDBOX (HITO 4)

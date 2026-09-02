@@ -29,8 +29,11 @@ class GestorBaseDatos:
                 print(f"Error al eliminar la base de datos vieja: {e}")
 
     def _conectar(self):
-        """Abre una conexión a la base de datos local usando ruta absoluta."""
-        return sqlite3.connect(self.db_path)
+        """Abre una conexión a la base de datos local usando ruta absoluta y modo WAL."""
+        conexion = sqlite3.connect(self.db_path, timeout=10.0)
+        conexion.execute("PRAGMA journal_mode=WAL;")
+        conexion.execute("PRAGMA busy_timeout=5000;")
+        return conexion
 
     def _crear_tablas(self):
         """Crea las tablas necesarias. Purga y migra de forma automática si detecta el esquema antiguo."""
@@ -78,6 +81,15 @@ class GestorBaseDatos:
                 pnl_realizado REAL
             )
         ''')
+
+        # Tabla de Caché de Sesión: Guarda el estado del bróker para modo offline
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS session_cache (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         
         conexion.commit()
         conexion.close()
@@ -111,6 +123,41 @@ class GestorBaseDatos:
         except Exception as e:
             print(f"Error al obtener logs: {e}")
             return pd.DataFrame()
+        finally:
+            conexion.close()
+
+    def guardar_cache(self, key, value_dict):
+        """Guarda un diccionario o lista serializado en JSON en la tabla de caché."""
+        import json
+        conexion = self._conectar()
+        cursor = conexion.cursor()
+        try:
+            val_str = json.dumps(value_dict)
+            cursor.execute(
+                "INSERT INTO session_cache (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP",
+                (key, val_str)
+            )
+            conexion.commit()
+        except Exception as e:
+            print(f"Error al guardar caché para {key} en BD: {e}")
+        finally:
+            conexion.close()
+
+    def obtener_cache(self, key):
+        """Obtiene un diccionario o lista deserializado desde la caché."""
+        import json
+        conexion = self._conectar()
+        cursor = conexion.cursor()
+        try:
+            cursor.execute("SELECT value FROM session_cache WHERE key = ?", (key,))
+            row = cursor.fetchone()
+            if row:
+                return json.loads(row[0])
+            return None
+        except Exception as e:
+            print(f"Error al obtener caché para {key} desde BD: {e}")
+            return None
         finally:
             conexion.close()
 

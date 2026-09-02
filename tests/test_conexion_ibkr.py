@@ -346,3 +346,109 @@ def test_obtener_estado_orden(mock_ib_class, gestor):
     # 3. Test cuando no se encuentra
     res3 = gestor.obtener_estado_orden(789)
     assert res3 is None
+
+
+@patch('conexion_ibkr.IB')
+def test_obtener_posiciones_cartera_filtra_cero(mock_ib_class, gestor):
+    ib_instance = mock_ib_class.return_value
+    gestor.ib = ib_instance
+    ib_instance.connect = MagicMock()
+    ib_instance.isConnected = MagicMock(return_value=True)
+
+    # Creamos items de portfolio, uno con posicion > 0, otro con posicion == 0.0
+    item_activo = MagicMock()
+    item_activo.contract.symbol = "AAPL"
+    item_activo.contract.secType = "STK"
+    item_activo.position = 100.0
+    item_activo.averageCost = 150.0
+    item_activo.marketValue = 15500.0
+    item_activo.unrealizedPNL = 500.0
+
+    item_cero = MagicMock()
+    item_cero.contract.symbol = "BBVA"
+    item_cero.contract.secType = "STK"
+    item_cero.position = 0.0
+    item_cero.averageCost = 0.0
+    item_cero.marketValue = 0.0
+    item_cero.unrealizedPNL = 0.0
+
+    ib_instance.portfolio = MagicMock(return_value=[item_activo, item_cero])
+
+    posiciones = gestor.obtener_posiciones_cartera()
+
+    # Comprobamos que solo se incluye AAPL y se ha excluido BBVA (con posición 0)
+    assert len(posiciones) == 1
+    assert posiciones[0]["Símbolo"] == "AAPL"
+    assert posiciones[0]["Posición"] == 100.0
+
+
+def test_reconciliar_estrategias_con_cartera():
+    from watchdogs import reconciliar_estrategias_con_cartera
+    import json
+    
+    # 1. Mock de Base de Datos
+    db_mock = MagicMock()
+    # Estrategia en estado ORDEN_ENVIADA para AAPL STOCK (BUY 25)
+    est_mock = {
+        "id": 401,
+        "ticker": "AAPL",
+        "tipo_activo": "STOCK",
+        "estado": "ORDEN_ENVIADA",
+        "patas_json": json.dumps([{"tipo_activo": "STOCK", "accion": "BUY", "cantidad": 25}]),
+        "precio_entrada": None
+    }
+    # Estrategia en estado CANCELADA para MSFT (que se ejecutó realmente)
+    est_mock_cancel = {
+        "id": 402,
+        "ticker": "MSFT",
+        "tipo_activo": "STOCK",
+        "estado": "CANCELADA",
+        "patas_json": json.dumps([{"tipo_activo": "STOCK", "accion": "BUY", "cantidad": 10}]),
+        "precio_entrada": None
+    }
+    
+    db_mock.obtener_estrategias.return_value = [est_mock, est_mock_cancel]
+    
+    # 2. Mock del Broker
+    broker_mock = MagicMock()
+    # Posición en AAPL en cartera (25.0 posiciones a precio medio 150.0)
+    pos_aapl = {
+        "Símbolo": "AAPL",
+        "Tipo": "STK",
+        "Posición": 25.0,
+        "Precio Medio": 150.0,
+        "Valor Mercado": 3750.0,
+        "P&L No Real.": 0.0
+    }
+    # Posición en MSFT en cartera (10.0 posiciones a precio medio 250.0)
+    pos_msft = {
+        "Símbolo": "MSFT",
+        "Tipo": "STK",
+        "Posición": 10.0,
+        "Precio Medio": 250.0,
+        "Valor Mercado": 2500.0,
+        "P&L No Real.": 0.0
+    }
+    # Una posición adicional (TSLA) que no tiene estrategia
+    pos_tsla = {
+        "Símbolo": "TSLA",
+        "Tipo": "STK",
+        "Posición": 5.0,
+        "Precio Medio": 200.0,
+        "Valor Mercado": 1000.0,
+        "P&L No Real.": 0.0
+    }
+    
+    broker_mock.obtener_posiciones_cartera.return_value = [pos_aapl, pos_msft, pos_tsla]
+    
+    # Ejecutamos la reconciliación
+    with patch('watchdogs.enviar_alerta_webhook'):
+        reconciliar_estrategias_con_cartera(db_mock, broker_mock)
+        
+    # Verificar que se actualizó el estado a ACTIVA para ambas
+    assert db_mock.actualizar_estado_estrategia.call_count == 2
+    
+    # Verificamos los argumentos de las llamadas
+    db_mock.actualizar_estado_estrategia.assert_any_call(estrategia_id=401, nuevo_estado="ACTIVA", precio_entrada=150.0)
+    db_mock.actualizar_estado_estrategia.assert_any_call(estrategia_id=402, nuevo_estado="ACTIVA", precio_entrada=250.0)
+

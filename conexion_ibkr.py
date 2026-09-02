@@ -339,6 +339,8 @@ class GestorIBKR:
                 posiciones = []
 
                 for item in items:
+                    if item.position == 0.0:
+                        continue
                     c = item.contract
                     if c.secType == 'OPT':
                         mult = float(c.multiplier) if (c.multiplier and c.multiplier.strip()) else 100.0
@@ -928,3 +930,62 @@ class GestorIBKR:
         except Exception as e:
             print(f"Error al enviar órdenes de protección a IBKR: {e}")
             raise
+
+    def obtener_cadenas_opciones_ibkr(self, underlying_symbol):
+        """
+        Consulta las expiraciones y strikes reales del subyacente usando la conexión de IB.
+        Devuelve un diccionario {expiracion: list_of_strikes} ordenado.
+        """
+        if not self.esta_conectado():
+            if not self.conectar():
+                return {}
+        try:
+            def _fetch():
+                # Obtener contrato calificado del subyacente
+                underlying = self._crear_contrato(underlying_symbol)
+                qualified = self.ib.qualifyContracts(underlying)
+                if not qualified:
+                    return {}
+                und_contract = qualified[0]
+                
+                # Pedir parámetros de definición de opciones
+                chains = self.ib.reqSecDefOptParams(
+                    und_contract.symbol, '', und_contract.secType, und_contract.conId
+                )
+                
+                if not chains:
+                    return {}
+                
+                # Tomar la cadena principal (usualmente SMART o la más grande)
+                # Filtramos por SMART exchange si está disponible, sino la primera
+                smart_chains = [c for c in chains if c.exchange == 'SMART']
+                chain = smart_chains[0] if smart_chains else chains[0]
+                
+                # Estructurar expiraciones y strikes
+                expirations = sorted(list(chain.expirations))
+                strikes = sorted(list(chain.strikes))
+                
+                # Intentar obtener el precio spot para filtrar un rango razonable de strikes (50% a 150% del spot)
+                try:
+                    precio_spot = self.obtener_precio_prueba(underlying_symbol)
+                    if precio_spot and precio_spot > 0:
+                        strikes_relevantes = [s for s in strikes if (precio_spot * 0.45) <= s <= (precio_spot * 1.55)]
+                        if len(strikes_relevantes) >= 4:
+                            strikes = strikes_relevantes
+                except Exception as e_spot:
+                    print(f"Aviso: No se pudo obtener precio spot para filtrar strikes: {e_spot}")
+                
+                # Retornamos un mapeo simple de expiraciones reales
+                result = {}
+                for exp in expirations:
+                    if len(exp) == 8:
+                        f_date = f"{exp[:4]}-{exp[4:6]}-{exp[6:]}"
+                    else:
+                        f_date = exp
+                    result[f_date] = strikes
+                return result
+            return self._run_sync_in_loop(_fetch)
+        except Exception as e:
+            print(f"Error al obtener cadenas de opciones en IBKR: {e}")
+            return {}
+
