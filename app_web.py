@@ -2755,6 +2755,17 @@ with tabs[2]:
         st.subheader("Parámetros Algorítmicos y Envío")
         st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Configura el tipo de orden y las condiciones de entrada/salida que vigilará el Watchdog.</p>", unsafe_allow_html=True)
 
+        # Cálculo automático de prima teórica neta acumulada por acción
+        credito_teorico_accion = 0.0
+        for p in st.session_state["patas_opciones"]:
+            sign = 1.0 if p["accion"] == "SELL" else -1.0
+            qty = float(p.get("cantidad", 1))
+            prima_p = float(p.get("prima_teorica", 0.0))
+            credito_teorico_accion += sign * qty * prima_p
+        credito_teorico_total = credito_teorico_accion * 100.0
+
+        st.info(f"💡 **Valoración Teórica Estimada:** `${credito_teorico_accion:+.2f}` / acción (~`${credito_teorico_total:+.2f}` USD por contrato de 100 acciones)")
+
         # Tipo de orden + prima objetivo
         col_o1, col_o2, col_o3 = st.columns(3)
         with col_o1:
@@ -2765,11 +2776,19 @@ with tabs[2]:
             with col_o2:
                 opt_precio_entrada = st.number_input(
                     "Prima de Entrada Objetivo ($ neto, crédito = + / débito = -)",
-                    value=0.0, step=0.1, key="opt_prima_obj"
+                    value=float(round(credito_teorico_accion, 2)), step=0.05, key="opt_prima_obj",
+                    help="Diferencia de prima solicitada. Crédito = positivo (+), Débito = negativo (-)."
                 )
+                st.caption(f"Equivale a: **${(opt_precio_entrada * 100.0):+.2f} USD** total por contrato")
         
         with col_o3:
-            opt_tif_val = st.selectbox("Validez (TIF)", ["DAY", "GTC"], index=0, key="opt_tif", help="**DAY**: Válida sólo durante el día de negociación.\n\n**GTC**: Válida hasta que se ejecute o cancele.")
+            opt_tif_val = st.selectbox(
+                "Validez (TIF)", 
+                ["DAY", "GTC"], 
+                index=0, 
+                key="opt_tif", 
+                help="**DAY**: Válida sólo durante el día de negociación actual.\n\n**GTC (Good-Til-Canceled)**: Permanece activa hasta su cancelación manual o ejecución, sujeta a las reglas del bróker."
+            )
 
         st.divider()
 
@@ -2786,8 +2805,9 @@ with tabs[2]:
                 o_h_fin = c3.text_input("Hora Fin", value="21:30", key="opt_h_fin", disabled=disabled)
             else:
                 try:
-                    from datetime import datetime, timedelta
-                    o_h_fin = (datetime.strptime(o_h_ini, "%H:%M") + timedelta(minutes=10)).strftime("%H:%M")
+                    import datetime as dt_mod
+                    from datetime import timedelta
+                    o_h_fin = (dt_mod.datetime.strptime(o_h_ini, "%H:%M") + timedelta(minutes=10)).strftime("%H:%M")
                 except Exception:
                     o_h_fin = "23:59"
                 c3.text_input("Hora Fin (Auto)", value=o_h_fin, disabled=True, key="opt_h_fin_auto")
@@ -2826,6 +2846,10 @@ with tabs[2]:
             
             opt_act_precio, vals_opt_precio = render_watchdog_card("Precio Disparador", "opt_act_precio", fields_opt_precio)
             opt_precio_op, opt_precio_val = vals_opt_precio if vals_opt_precio else ("<=", 100.0)
+
+        # Mensaje explícito cuando no hay condiciones de entrada avanzadas activadas
+        if not any([opt_act_horario, opt_act_vix, opt_act_sma, opt_act_precio]):
+            st.info("ℹ️ Sin condiciones de entrada avanzadas activadas, la estrategia será elegible para su envío inmediato por el Watchdog de Entradas.")
 
         # Frecuencia (siempre visible debajo del grid)
         opt_frecuencia = st.selectbox("Frecuencia de Ejecución", ["Única", "Diaria", "Semanal"], key="opt_frecuencia")
@@ -2884,15 +2908,36 @@ with tabs[2]:
                 opt_hora_sal = "21:45"
                 
         st.markdown("<br>", unsafe_allow_html=True)
+        
+        lbl_obj = f"${opt_precio_entrada:+.2f}" if opt_precio_entrada is not None else "Mercado"
+        confirm_encolar = st.checkbox(
+            f"Confirmar encolado de estrategia ({opt_tipo_lmt}: {lbl_obj} / acción | Valor Teórico: ${credito_teorico_accion:+.2f})",
+            key="chk_confirm_encolar_opt"
+        )
         submit_opt = st.button("Encolar Estrategia Opciones", width="stretch", key="btn_encolar_opciones")
 
         if submit_opt:
-            # Serializamos las patas
+            if not confirm_encolar:
+                st.warning("⚠️ Debes marcar la casilla de confirmación antes de encolar la estrategia.")
+                st.stop()
+
+            if opt_tipo_lmt == "Crédito/Débito Neto":
+                if opt_precio_entrada is None or abs(opt_precio_entrada) < 1e-4:
+                    st.error("❌ El precio límite de entrada no puede ser 0.0 USD. Especifica una prima objetivo válida.")
+                    st.stop()
+                if credito_teorico_accion > 0 and opt_precio_entrada < 0:
+                    st.error("❌ Conflicto de signo: La estrategia es de Crédito (+), pero ingresaste una prima objetivo de Débito (-).")
+                    st.stop()
+                elif credito_teorico_accion < 0 and opt_precio_entrada > 0:
+                    st.error("❌ Conflicto de signo: La estrategia es de Débito (-), pero ingresaste una prima objetivo de Crédito (+).")
+                    st.stop()
+
+            # Serializamos las patas centralizando con normalizar_vencimiento
             patas_serializadas = []
             for p in st.session_state["patas_opciones"]:
                 p_copy = p.copy()
-                if isinstance(p_copy["vencimiento"], date):
-                    p_copy["vencimiento"] = p_copy["vencimiento"].strftime('%Y-%m-%d')
+                venc_date_copy = normalizar_vencimiento(p_copy["vencimiento"])
+                p_copy["vencimiento"] = venc_date_copy.strftime('%Y-%m-%d')
                 patas_serializadas.append(p_copy)
 
             # Construimos condiciones de entrada

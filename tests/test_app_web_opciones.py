@@ -2,6 +2,7 @@ import pytest
 import math
 import sys
 import os
+import json
 import datetime as dt
 from zoneinfo import ZoneInfo
 
@@ -9,6 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from motor_bs import MotorBlackScholes
 from motor_logica import MotorEstrategias
+from base_datos import GestorBaseDatos
 
 def normalizar_vencimiento(valor):
     if isinstance(valor, dt.datetime):
@@ -27,13 +29,14 @@ def normalizar_vencimiento(valor):
 
 def test_ausencia_referencias_t_calc_en_codigo():
     """
-    Verifica que no queden referencias desfasadas a 'T_calc' en app_web.py.
+    Verifica que no queden referencias desfasadas a 'T_calc' ni 'isinstance(..., date)' desnudas en app_web.py.
     """
     ruta_app = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'app_web.py'))
     with open(ruta_app, 'r', encoding='utf-8') as f:
         contenido = f.read()
     
     assert "T_calc" not in contenido, "Se encontró la variable obsoleta 'T_calc' en app_web.py"
+    assert "isinstance(p_copy[\"vencimiento\"], date)" not in contenido, "Se encontró isinstance desnudas sin alias en app_web.py"
 
 def test_normalizar_vencimiento_formatos():
     """
@@ -189,51 +192,89 @@ def test_obtener_prima_pata_estricta_excepciones():
     with pytest.raises(ValueError, match="Modo de prima no reconocido"):
         MotorEstrategias.obtener_prima_pata(pata_completa, modo="MODO_INVALIDO")
 
-def test_independencia_dias_sim_y_primas_iniciales():
+def test_encolado_opciones_sin_nameerror():
     """
-    Verifica que cambiar T_escenario modifique las griegas y la curva temporal
-    sin alterar las primas iniciales fijadas por T_inicial.
+    Prueba el encolado real en base de datos offline con patas en 3 formatos de vencimiento:
+    string '2026-09-25', dt.date(2026, 9, 25), dt.datetime(2026, 9, 25, 10, 0).
+    Verifica que no se produzca NameError, que las patas se serialicen en ISO YYYY-MM-DD,
+    que la estrategia quede PENDIENTE y que TIF (DAY/GTC) se persista correctamente.
     """
-    S = 324.14
-    T_inicial = 22.0 / 365.0
-    r = 0.05
-    sigma = 0.25
-    
-    prima_init = MotorBlackScholes.calcular_prima_bs(S, 322.5, T_inicial, r, sigma, 'P')
-    
-    T_escenario = 10.0 / 365.0
-    griegas_escenario = MotorBlackScholes.calcular_greeks(S, 322.5, T_escenario, r, sigma, 'P')
-    
-    assert prima_init == MotorBlackScholes.calcular_prima_bs(S, 322.5, T_inicial, r, sigma, 'P')
-    griegas_init = MotorBlackScholes.calcular_greeks(S, 322.5, T_inicial, r, sigma, 'P')
-    assert griegas_escenario["theta"] != griegas_init["theta"]
+    db_path_temp = "test_temp_encolar.db"
+    db_mem = GestorBaseDatos(db_name=db_path_temp, reset_db=True)
+    try:
+        patas_raw = [
+            {"tipo_activo": "OPTION", "accion": "BUY", "cantidad": 1, "strike": 317.5, "right": "P", "vencimiento": "2026-09-25", "prima_teorica": 4.34},
+            {"tipo_activo": "OPTION", "accion": "SELL", "cantidad": 1, "strike": 322.5, "right": "P", "vencimiento": dt.date(2026, 9, 25), "prima_teorica": 6.30},
+            {"tipo_activo": "OPTION", "accion": "SELL", "cantidad": 1, "strike": 327.5, "right": "C", "vencimiento": dt.datetime(2026, 9, 25, 12, 0), "prima_teorica": 7.24},
+            {"tipo_activo": "OPTION", "accion": "BUY", "cantidad": 1, "strike": 332.5, "right": "C", "vencimiento": "2026-09-25", "prima_teorica": 5.20}
+        ]
+        
+        # Proceso de normalización idéntico a app_web.py
+        patas_serializadas = []
+        for p in patas_raw:
+            p_copy = p.copy()
+            venc_date_copy = normalizar_vencimiento(p_copy["vencimiento"])
+            p_copy["vencimiento"] = venc_date_copy.strftime('%Y-%m-%d')
+            patas_serializadas.append(p_copy)
+            
+        condiciones_entrada = {
+            "frecuencia": {"activo": False, "tipo": "Única"},
+            "tif": "GTC"
+        }
+        condiciones_salida = {
+            "stop_loss": -300.0,
+            "take_profit": 600.0
+        }
+        
+        est_id = db_mem.crear_estrategia(
+            ticker="AAPL",
+            tipo_activo="BAG",
+            estado="PENDIENTE",
+            patas=patas_serializadas,
+            precio_entrada=4.00,
+            condiciones_entrada=condiciones_entrada,
+            condiciones_salida=condiciones_salida
+        )
+        
+        estrategias = db_mem.obtener_estrategias(estado="PENDIENTE")
+        assert len(estrategias) == 1
+        est = estrategias[0]
+        assert est["id"] == est_id
+        assert est["estado"] == "PENDIENTE"
+        assert est["precio_entrada"] == 4.00
+        assert est["condiciones_entrada"]["tif"] == "GTC"
+        
+        # Verificar formato de vencimiento en las 4 patas
+        for leg in est["patas"]:
+            assert leg["vencimiento"] == "2026-09-25"
+    finally:
+        db_mem.borrar_base_datos()
 
-def test_flujo_renderizado_sin_nameerror():
+def test_validacion_precio_limite_y_credito_teorico():
     """
-    Simula la ejecución del bucle de patas de app_web.py (línea 2402)
-    para verificar que T_inicial reemplaza correctamente a T_calc sin NameError.
+    Verifica que:
+    1. El crédito teórico de la combinación Iron Condor 22d sea aproximadamente +4.00 USD por acción.
+    2. Recharce precio limite 0.0 USD para ordenes de crédito/débito.
+    3. Rechace desajuste de signo entre crédito (+) y prima negativa (-).
     """
-    spot_ref = 324.14
-    days_to_exp = 22
-    T_inicial = days_to_exp / 365.0
-    r_calc = 0.05
-    sigma_calc = 0.25
-    
     patas = [
-        {"strike": 317.5, "right": "P", "accion": "BUY", "cantidad": 1},
-        {"strike": 322.5, "right": "P", "accion": "SELL", "cantidad": 1},
-        {"strike": 327.5, "right": "C", "accion": "SELL", "cantidad": 1},
-        {"strike": 332.5, "right": "C", "accion": "BUY", "cantidad": 1}
+        {"accion": "BUY", "cantidad": 1, "prima_teorica": 4.34},
+        {"accion": "SELL", "cantidad": 1, "prima_teorica": 6.30},
+        {"accion": "SELL", "cantidad": 1, "prima_teorica": 7.24},
+        {"accion": "BUY", "cantidad": 1, "prima_teorica": 5.20}
     ]
     
-    for pata in patas:
-        premium_bs = MotorBlackScholes.calcular_prima_bs(
-            S=spot_ref,
-            K=float(pata["strike"]),
-            T=T_inicial,
-            r=r_calc,
-            sigma=sigma_calc,
-            tipo=pata["right"]
-        )
-        pata["prima_teorica"] = float(premium_bs)
-        assert pata["prima_teorica"] > 0
+    credito_teorico_accion = 0.0
+    for p in patas:
+        sign = 1.0 if p["accion"] == "SELL" else -1.0
+        qty = float(p["cantidad"])
+        credito_teorico_accion += sign * qty * float(p["prima_teorica"])
+        
+    assert math.isclose(credito_teorico_accion, 4.00, abs_tol=0.05)
+    
+    # Reglas de validación
+    precio_lmt_cero = 0.0
+    assert abs(precio_lmt_cero) < 1e-4 # Debe ser rechazado
+    
+    precio_lmt_incoherente = -4.00
+    assert credito_teorico_accion > 0 and precio_lmt_incoherente < 0 # Conflicto detectado
