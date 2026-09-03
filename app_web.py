@@ -2320,6 +2320,9 @@ with tabs[2]:
         )
         
         # 5. Calcular Prima Teórica (Black-Scholes) y fijar automáticamente
+        if "opt_vol_sim" not in st.session_state:
+            st.session_state["opt_vol_sim"] = 25
+            
         precio_ref_calc = st.session_state.get("precio_subyacente_opt")
         if precio_ref_calc is None or precio_ref_calc <= 0:
             # Inferir precio spot aproximado del promedio de los strikes si no hay cotización activa
@@ -2336,8 +2339,8 @@ with tabs[2]:
         days_to_exp = (venc_date - date.today()).days
         T_calc = max(days_to_exp, 1) / 365.0
         
-        # Calcular la prima usando Black-Scholes (usando la volatilidad del slider o 20% por defecto)
-        sigma_calc = float(st.session_state.get("opt_vol_sim", 20)) / 100.0 if st.session_state.get("opt_vol_sim") else 0.20
+        # Calcular la prima usando Black-Scholes (sincronizado con la volatilidad del slider)
+        sigma_calc = float(st.session_state.get("opt_vol_sim", 25)) / 100.0
         premium_bs = MotorBlackScholes.calcular_prima_bs(
             S=precio_ref_calc,
             K=float(pata["strike"]),
