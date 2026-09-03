@@ -43,6 +43,67 @@ def broker_esta_conectado(broker):
         return False
     return False
 
+def procesar_encolado_opciones(db_inst, confirm_encolar, opt_tipo_lmt, opt_precio_entrada, credito_teorico_accion, patas_opciones, opt_cond_ent, opt_cond_sal, opt_ticker, opt_frecuencia, opt_permitir_duplicado):
+    """
+    Procesa la validación e inserción de la estrategia de opciones de forma aislada.
+    Devuelve un diccionario con el resultado sin interrumpir la ejecución global de Streamlit (sin st.stop).
+    """
+    if not confirm_encolar:
+        return {"ok": False, "tipo": "validacion", "mensaje": "⚠️ Debes marcar la casilla de confirmación antes de encolar la estrategia."}
+
+    if opt_tipo_lmt == "Crédito/Débito Neto":
+        if opt_precio_entrada is None or abs(opt_precio_entrada) < 1e-4:
+            return {"ok": False, "tipo": "validacion", "mensaje": "❌ El precio límite de entrada no puede ser 0.0 USD. Especifica una prima objetivo válida."}
+        if credito_teorico_accion > 0 and opt_precio_entrada < 0:
+            return {"ok": False, "tipo": "validacion", "mensaje": "❌ Conflicto de signo: La estrategia es de Crédito (+), pero ingresaste una prima objetivo de Débito (-)."}
+        elif credito_teorico_accion < 0 and opt_precio_entrada > 0:
+            return {"ok": False, "tipo": "validacion", "mensaje": "❌ Conflicto de signo: La estrategia es de Débito (-), pero ingresaste una prima objetivo de Crédito (+)."}
+
+    try:
+        patas_serializadas = []
+        for p in patas_opciones:
+            p_copy = p.copy()
+            venc_date_copy = normalizar_vencimiento(p_copy["vencimiento"])
+            p_copy["vencimiento"] = venc_date_copy.strftime('%Y-%m-%d')
+            patas_serializadas.append(p_copy)
+    except Exception as exc:
+        return {"ok": False, "tipo": "validacion", "mensaje": f"❌ Error en normalización de vencimiento: {exc}"}
+
+    tipo_act_est = "BAG" if len(patas_serializadas) > 1 else "OPTION"
+
+    try:
+        est_id = db_inst.crear_estrategia(
+            ticker=opt_ticker,
+            tipo_activo=tipo_act_est,
+            estado="PENDIENTE_ENTRADA",
+            patas=patas_serializadas,
+            condiciones_entrada=opt_cond_ent if opt_cond_ent else None,
+            condiciones_salida=opt_cond_sal if opt_cond_sal else None,
+            precio_entrada=opt_precio_entrada,
+            permitir_duplicado=opt_permitir_duplicado
+        )
+        return {
+            "ok": True,
+            "id": est_id,
+            "tipo_act_est": tipo_act_est,
+            "patas_serializadas": patas_serializadas
+        }
+    except EstrategiaDuplicadaError as dup_err:
+        est_dup_id = dup_err.est_existente_id
+        db_inst.registrar_evento("DUPLICADO_BLOQUEADO", f"Intento de encolar duplicado para {opt_ticker} bloqueado por huella canónica (ID existente #{est_dup_id}).")
+        return {
+            "ok": False,
+            "tipo": "duplicado",
+            "id_existente": est_dup_id,
+            "mensaje": f"⚠️ **Estrategia Duplicada Bloqueada:** Ya existe una estrategia idéntica pendiente o activa con ID #{est_dup_id}.\n\nMarca la casilla **'Permitir estrategia duplicada'** si deseas asumir conscientemente el riesgo acumulado de duplicar la posición."
+        }
+    except sqlite3.Error as sql_err:
+        return {
+            "ok": False,
+            "tipo": "base_datos",
+            "mensaje": f"❌ Error de Base de Datos al guardar estrategia: {sql_err}"
+        }
+
 # --- INICIALIZACIÓN GLOBAL DE WATCHDOGS (HITO 4) ---
 @st.cache_resource(on_release=lambda x: detener_watchdogs())
 def iniciar_watchdogs_globales(_broker):
@@ -2764,67 +2825,6 @@ with tabs[2]:
         col_g1.metric("Delta Neto de Cartera (Δ)", f"{delta_net:.2f}", help="Sensibilidad respecto al precio del subyacente")
         col_g2.metric("Theta Neto Diario (Θ)", f"${theta_net:.2f}", help="Decaimiento temporal diario de la posición")
         col_g3.metric("Vega Neto (V)", f"${vega_net:.2f}", help="Sensibilidad respecto a cambios del 1% en Volatilidad")
-        
-def procesar_encolado_opciones(confirm_encolar, opt_tipo_lmt, opt_precio_entrada, credito_teorico_accion, patas_opciones, opt_cond_ent, opt_cond_sal, opt_ticker, opt_frecuencia, opt_permitir_duplicado):
-    """
-    Procesa la validación e inserción de la estrategia de opciones de forma aislada.
-    Devuelve un diccionario con el resultado sin interrumpir la ejecución global de Streamlit (sin st.stop).
-    """
-    if not confirm_encolar:
-        return {"ok": False, "tipo": "validacion", "mensaje": "⚠️ Debes marcar la casilla de confirmación antes de encolar la estrategia."}
-
-    if opt_tipo_lmt == "Crédito/Débito Neto":
-        if opt_precio_entrada is None or abs(opt_precio_entrada) < 1e-4:
-            return {"ok": False, "tipo": "validacion", "mensaje": "❌ El precio límite de entrada no puede ser 0.0 USD. Especifica una prima objetivo válida."}
-        if credito_teorico_accion > 0 and opt_precio_entrada < 0:
-            return {"ok": False, "tipo": "validacion", "mensaje": "❌ Conflicto de signo: La estrategia es de Crédito (+), pero ingresaste una prima objetivo de Débito (-)."}
-        elif credito_teorico_accion < 0 and opt_precio_entrada > 0:
-            return {"ok": False, "tipo": "validacion", "mensaje": "❌ Conflicto de signo: La estrategia es de Débito (-), pero ingresaste una prima objetivo de Crédito (+)."}
-
-    try:
-        patas_serializadas = []
-        for p in patas_opciones:
-            p_copy = p.copy()
-            venc_date_copy = normalizar_vencimiento(p_copy["vencimiento"])
-            p_copy["vencimiento"] = venc_date_copy.strftime('%Y-%m-%d')
-            patas_serializadas.append(p_copy)
-    except Exception as exc:
-        return {"ok": False, "tipo": "validacion", "mensaje": f"❌ Error en normalización de vencimiento: {exc}"}
-
-    tipo_act_est = "BAG" if len(patas_serializadas) > 1 else "OPTION"
-
-    try:
-        est_id = db.crear_estrategia(
-            ticker=opt_ticker,
-            tipo_activo=tipo_act_est,
-            estado="PENDIENTE_ENTRADA",
-            patas=patas_serializadas,
-            condiciones_entrada=opt_cond_ent if opt_cond_ent else None,
-            condiciones_salida=opt_cond_sal if opt_cond_sal else None,
-            precio_entrada=opt_precio_entrada,
-            permitir_duplicado=opt_permitir_duplicado
-        )
-        return {
-            "ok": True,
-            "id": est_id,
-            "tipo_act_est": tipo_act_est,
-            "patas_serializadas": patas_serializadas
-        }
-    except EstrategiaDuplicadaError as dup_err:
-        est_dup_id = dup_err.est_existente_id
-        db.registrar_evento("DUPLICADO_BLOQUEADO", f"Intento de encolar duplicado para {opt_ticker} bloqueado por huella canónica (ID existente #{est_dup_id}).")
-        return {
-            "ok": False,
-            "tipo": "duplicado",
-            "id_existente": est_dup_id,
-            "mensaje": f"⚠️ **Estrategia Duplicada Bloqueada:** Ya existe una estrategia idéntica pendiente o activa con ID #{est_dup_id}.\n\nMarca la casilla **'Permitir estrategia duplicada'** si deseas asumir conscientemente el riesgo acumulado de duplicar la posición."
-        }
-    except sqlite3.Error as sql_err:
-        return {
-            "ok": False,
-            "tipo": "base_datos",
-            "mensaje": f"❌ Error de Base de Datos al guardar estrategia: {sql_err}"
-        }
 
         # --- PARÁMETROS ALGORÍTMICOS Y ENVÍO ---
         st.divider()

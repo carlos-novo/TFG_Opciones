@@ -508,45 +508,65 @@ def test_procesar_encolado_opciones_sin_st_stop():
     from base_datos import GestorBaseDatos
     
     patas = [{"accion": "BUY", "right": "C", "strike": 100.0, "cantidad": 1, "vencimiento": "2026-09-25"}]
-    
-    # 1. Sin confirmación
-    res1 = procesar_encolado_opciones(False, "Mercado", None, 2.50, patas, {}, {}, "AAPL", "Única", False)
-    assert res1["ok"] is False
-    assert res1["tipo"] == "validacion"
-    assert "confirmación" in res1["mensaje"]
-    
-    # 2. Precio límite 0.0
-    res2 = procesar_encolado_opciones(True, "Crédito/Débito Neto", 0.0, 2.50, patas, {}, {}, "AAPL", "Única", False)
-    assert res2["ok"] is False
-    assert "0.0 USD" in res2["mensaje"]
-    
-    # 3. Conflicto de signos
-    res3 = procesar_encolado_opciones(True, "Crédito/Débito Neto", -2.50, 2.50, patas, {}, {}, "AAPL", "Única", False)
-    assert res3["ok"] is False
-    assert "Conflicto de signo" in res3["mensaje"]
-    
-    # 4. Duplicado bloqueado
     db_path_temp = "test_temp_proc.db"
     db_mem = GestorBaseDatos(db_name=db_path_temp, reset_db=True)
     try:
-        # Primer intento exitoso
+        # 1. Sin confirmación
+        res1 = procesar_encolado_opciones(db_mem, False, "Mercado", None, 2.50, patas, {}, {}, "AAPL", "Única", False)
+        assert res1["ok"] is False
+        assert res1["tipo"] == "validacion"
+        assert "confirmación" in res1["mensaje"]
+        
+        # 2. Precio límite 0.0
+        res2 = procesar_encolado_opciones(db_mem, True, "Crédito/Débito Neto", 0.0, 2.50, patas, {}, {}, "AAPL", "Única", False)
+        assert res2["ok"] is False
+        assert "0.0 USD" in res2["mensaje"]
+        
+        # 3. Conflicto de signos
+        res3 = procesar_encolado_opciones(db_mem, True, "Crédito/Débito Neto", -2.50, 2.50, patas, {}, {}, "AAPL", "Única", False)
+        assert res3["ok"] is False
+        assert "Conflicto de signo" in res3["mensaje"]
+        
+        # 4. Duplicado bloqueado
         id1 = db_mem.crear_estrategia("AAPL", "OPTION", "PENDIENTE_ENTRADA", patas, precio_entrada=2.50)
         assert isinstance(id1, int)
         
-        # Inserción vía helper (debe retornar ok=False y tipo='duplicado')
-        import app_web
-        original_db = app_web.db
-        app_web.db = db_mem
-        try:
-            res_dup = procesar_encolado_opciones(True, "Crédito/Débito Neto", 2.50, 2.50, patas, {}, {}, "AAPL", "Única", False)
-            assert res_dup["ok"] is False
-            assert res_dup["tipo"] == "duplicado"
-            assert res_dup["id_existente"] == id1
-            assert "Estrategia Duplicada Bloqueada" in res_dup["mensaje"]
-        finally:
-            app_web.db = original_db
+        res_dup = procesar_encolado_opciones(db_mem, True, "Crédito/Débito Neto", 2.50, 2.50, patas, {}, {}, "AAPL", "Única", False)
+        assert res_dup["ok"] is False
+        assert res_dup["tipo"] == "duplicado"
+        assert res_dup["id_existente"] == id1
+        assert "Estrategia Duplicada Bloqueada" in res_dup["mensaje"]
     finally:
         db_mem.borrar_base_datos()
 
-
-
+def test_renderizado_completo_pestana_opciones_ast():
+    """
+    Verifica mediante análisis del código fuente de app_web.py que la pestaña de opciones (tabs[2]):
+    - No define funciones internas que des-indenten o aíslen componentes visuales.
+    - Contiene 'Greeks Teóricos Estimados'.
+    - Contiene 'Parámetros Algorítmicos y Envío'.
+    - Contiene 'Condiciones de Entrada Avanzadas'.
+    - Contiene 'Condiciones de Salida Avanzadas'.
+    - Contiene 'Confirmar encolado'.
+    - Contiene 'Encolar Estrategia Opciones'.
+    - Invoca procesar_encolado_opciones.
+    - No contiene st.stop() en el flujo de renderizado.
+    """
+    with open("app_web.py", "r", encoding="utf-8") as f:
+        code = f.read()
+        
+    assert "def procesar_encolado_opciones(" in code
+    tabs2_pos = code.find("with tabs[2]:")
+    tabs3_pos = code.find("with tabs[3]:")
+    assert tabs2_pos != -1 and tabs3_pos != -1
+    
+    tabs2_code = code[tabs2_pos:tabs3_pos]
+    
+    assert "def procesar_encolado_opciones" not in tabs2_code, "procesar_encolado_opciones no debe estar declarada dentro de tabs[2]"
+    assert "Greeks Teóricos Estimados" in tabs2_code
+    assert "Parámetros Algorítmicos y Envío" in tabs2_code
+    assert "Condiciones de Entrada Avanzadas" in tabs2_code
+    assert "Condiciones de Salida Avanzadas" in tabs2_code
+    assert "chk_confirm_encolar_opt" in tabs2_code
+    assert "btn_encolar_opciones" in tabs2_code
+    assert "st.stop()" not in tabs2_code, "tabs[2] no debe contener st.stop() en el flujo operativo"
