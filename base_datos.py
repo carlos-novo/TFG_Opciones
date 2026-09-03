@@ -213,34 +213,36 @@ class GestorBaseDatos:
 
     def crear_estrategia(self, ticker, tipo_activo, estado, patas, condiciones_entrada=None, condiciones_salida=None, precio_entrada=None, permitir_duplicado=False):
         """
-        Inserta una nueva estrategia en la base de datos protegiendo la idempotencia mediante huella SHA-256.
+        Inserta una nueva estrategia en la base de datos protegiendo la idempotencia mediante huella SHA-256
+        dentro de una transacción estricta BEGIN IMMEDIATE.
         Si la estrategia ya existe en estado activo/pendiente y permitir_duplicado=False, lanza EstrategiaDuplicadaError.
         """
         conexion = self._conectar()
-        cursor = conexion.cursor()
-        ahora = datetime.now().isoformat()
-        
-        huella = calcular_huella_estrategia(ticker, tipo_activo, patas, precio_entrada, condiciones_entrada, condiciones_salida)
-        
-        if not permitir_duplicado:
-            cursor.execute('''
-                SELECT id FROM estrategias 
-                WHERE huella_hash = ? AND estado IN ('PENDIENTE', 'PENDIENTE_ENTRADA', 'ORDEN_ENVIADA', 'ACTIVA', 'EJECUTADA')
-            ''', (huella,))
-            existente = cursor.fetchone()
-            if existente:
-                est_id_existente = existente[0]
-                conexion.close()
-                raise EstrategiaDuplicadaError(
-                    f"Ya existe una estrategia idéntica pendiente o activa con ID #{est_id_existente}.",
-                    est_existente_id=est_id_existente
-                )
-        
-        patas_str = json.dumps(patas)
-        cond_entrada_str = json.dumps(condiciones_entrada) if condiciones_entrada is not None else None
-        cond_salida_str = json.dumps(condiciones_salida) if condiciones_salida is not None else None
-        
         try:
+            conexion.execute("BEGIN IMMEDIATE;")
+            cursor = conexion.cursor()
+            ahora = datetime.now().isoformat()
+            
+            huella = calcular_huella_estrategia(ticker, tipo_activo, patas, precio_entrada, condiciones_entrada, condiciones_salida)
+            
+            if not permitir_duplicado:
+                cursor.execute('''
+                    SELECT id FROM estrategias 
+                    WHERE huella_hash = ? AND estado IN ('PENDIENTE', 'PENDIENTE_ENTRADA', 'ORDEN_ENVIADA', 'ACTIVA', 'EJECUTADA')
+                ''', (huella,))
+                existente = cursor.fetchone()
+                if existente:
+                    est_id_existente = existente[0]
+                    conexion.rollback()
+                    raise EstrategiaDuplicadaError(
+                        f"Ya existe una estrategia idéntica pendiente o activa con ID #{est_id_existente}.",
+                        est_existente_id=est_id_existente
+                    )
+            
+            patas_str = json.dumps(patas)
+            cond_entrada_str = json.dumps(condiciones_entrada) if condiciones_entrada is not None else None
+            cond_salida_str = json.dumps(condiciones_salida) if condiciones_salida is not None else None
+            
             cursor.execute('''
                 INSERT INTO estrategias (
                     ticker, tipo_activo, estado, fecha_creacion,
@@ -252,7 +254,12 @@ class GestorBaseDatos:
             self.registrar_evento("CREAR_ESTRATEGIA", f"Creada estrategia ID {estrategia_id} para {ticker} ({tipo_activo}) [Huella: {huella[:8]}]")
             return estrategia_id
         except Exception as e:
-            self.registrar_evento("ERROR_CREAR_ESTRATEGIA", f"Error al insertar estrategia: {e}")
+            try:
+                conexion.rollback()
+            except Exception:
+                pass
+            if not isinstance(e, EstrategiaDuplicadaError):
+                self.registrar_evento("ERROR_CREAR_ESTRATEGIA", f"Error al insertar estrategia: {e}")
             raise e
         finally:
             conexion.close()

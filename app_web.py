@@ -2750,6 +2750,15 @@ with tabs[2]:
         col_g2.metric("Theta Neto Diario (Θ)", f"${theta_net:.2f}", help="Decaimiento temporal diario de la posición")
         col_g3.metric("Vega Neto (V)", f"${vega_net:.2f}", help="Sensibilidad respecto a cambios del 1% en Volatilidad")
         
+        # Muestra mensaje flash de encolado previo si existe
+        resultado_flash = st.session_state.pop("_flash_encolado_opt", None)
+        if resultado_flash:
+            est_id_flash = resultado_flash["id"]
+            if resultado_flash.get("notificacion_ok", True):
+                st.success(f"🚀 Estrategia de opciones #{est_id_flash} encolada correctamente en estado PENDIENTE_ENTRADA.")
+            else:
+                st.warning(f"🚀 Estrategia de opciones #{est_id_flash} encolada en estado PENDIENTE_ENTRADA (Nota: La notificación telemétrica a Discord no pudo enviarse).")
+
         # --- PARÁMETROS ALGORÍTMICOS Y ENVÍO ---
         st.divider()
         st.subheader("Parámetros Algorítmicos y Envío")
@@ -2907,6 +2916,15 @@ with tabs[2]:
             if opt_hora_sal is None:
                 opt_hora_sal = "21:45"
                 
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # Reinicio diferido de checkboxes ANTES de su instanciación
+        if st.session_state.pop("_reset_confirm_encolar_opt", False):
+            st.session_state["chk_confirm_encolar_opt"] = False
+
+        if st.session_state.pop("_reset_permitir_dup_opt", False):
+            st.session_state["chk_permitir_dup_opt"] = False
+                
         col_dup, col_conf = st.columns([1, 2])
         with col_dup:
             opt_permitir_duplicado = st.checkbox(
@@ -2978,6 +2996,7 @@ with tabs[2]:
 
             tipo_act_est = "BAG" if len(patas_serializadas) > 1 else "OPTION"
 
+            # 1. Intentar INSERT en base de datos de forma transaccional e independiente
             try:
                 est_id = db.crear_estrategia(
                     ticker=opt_ticker,
@@ -2989,26 +3008,39 @@ with tabs[2]:
                     precio_entrada=opt_precio_entrada,
                     permitir_duplicado=opt_permitir_duplicado
                 )
+            except EstrategiaDuplicadaError as dup_err:
+                est_dup_id = dup_err.est_existente_id
+                st.warning(f"⚠️ **Estrategia Duplicada Bloqueada:** Ya existe una estrategia idéntica pendiente o activa con ID #{est_dup_id}.\n\nMarca la casilla **'Permitir estrategia duplicada'** si deseas asumir conscientemente el riesgo acumulado de duplicar la posición.")
+                db.registrar_evento("DUPLICADO_BLOQUEADO", f"Intento de encolar duplicado para {opt_ticker} bloqueado por huella canónica (ID existente #{est_dup_id}).")
+                st.stop()
+            except sqlite3.Error as sql_err:
+                st.error(f"❌ Error de Base de Datos al guardar estrategia: {sql_err}")
+                st.stop()
 
-                st.session_state["ultima_estrategia_creada_id"] = est_id
-                st.session_state["chk_confirm_encolar_opt"] = False
+            # 2. Inserción CONFIRMADA
+            db.registrar_evento("CREACION_ESTRATEGIA_UI", f"Estrategia #{est_id} de opciones ({opt_ticker}) encolada.")
 
-                st.success(f"🚀 Estrategia de opciones #{est_id} encolada correctamente en estado PENDIENTE_ENTRADA.")
-                db.registrar_evento("CREACION_ESTRATEGIA_UI", f"Estrategia #{est_id} de opciones ({opt_ticker}) encolada.")
-
+            # 3. Intentar notificación Discord independientemente (sin afectar el guardado en BD)
+            notificacion_ok = True
+            try:
                 modo_red = "ONLINE (IBKR Conectado)" if (broker_global and broker_global.conectado) else "OFFLINE / NO TRANSMITIDA"
-
                 enviar_alerta_webhook(
                     titulo=f"📥 Nueva Estrategia Encolada (Opciones) [{modo_red}]",
                     mensaje=f"**ID:** #{est_id}\n**Ticker:** {opt_ticker}\n**Tipo:** {tipo_act_est}\n**Patas:** {len(patas_serializadas)} patas\n**Precio Objetivo:** {opt_precio_entrada if opt_precio_entrada else 'Mercado'}\n**Frecuencia:** {opt_frecuencia}\n**Modo:** {modo_red}",
                     color="info"
                 )
-            except EstrategiaDuplicadaError as dup_err:
-                est_dup_id = dup_err.est_existente_id
-                st.warning(f"⚠️ **Estrategia Duplicada Bloqueada:** Ya existe una estrategia idéntica pendiente o activa con ID #{est_dup_id}.\n\nMarca la casilla **'Permitir estrategia duplicada'** si deseas asumir conscientemente el riesgo acumulado de duplicar la posición.")
-                db.registrar_evento("DUPLICADO_BLOQUEADO", f"Intento de encolar duplicado para {opt_ticker} bloqueado por huella canónica (ID existente #{est_dup_id}).")
-            except Exception as e:
-                st.error(f"Error al guardar estrategia: {e}")
+            except Exception as notif_err:
+                notificacion_ok = False
+                db.registrar_evento("ERROR_DISCORD", f"Error al enviar notificación Discord para estrategia #{est_id}: {notif_err}")
+
+            # 4. Activar reinicio diferido, guardar estado flash y ejecutar st.rerun()
+            st.session_state["_reset_confirm_encolar_opt"] = True
+            st.session_state["_reset_permitir_dup_opt"] = True
+            st.session_state["_flash_encolado_opt"] = {
+                "id": est_id,
+                "notificacion_ok": notificacion_ok
+            }
+            st.rerun()
 
 
 # ==========================================

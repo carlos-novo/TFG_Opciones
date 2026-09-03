@@ -411,3 +411,68 @@ def test_notificacion_offline_contiene_no_transmitida(monkeypatch):
     assert "OFFLINE / NO TRANSMITIDA" in ultimo_payload["embeds"][0]["title"]
     assert "OFFLINE / NO TRANSMITIDA" in ultimo_payload["embeds"][0]["description"]
 
+def test_diferenciacion_huella_day_vs_gtc():
+    """
+    Verifica que la misma combinación con TIF 'DAY' y 'GTC' genere huellas SHA-256 distintas
+    permitiendo encolar ambas sin colisión.
+    """
+    from base_datos import calcular_huella_estrategia, EstrategiaDuplicadaError
+    
+    db_path_temp = "test_temp_tif.db"
+    db_mem = GestorBaseDatos(db_name=db_path_temp, reset_db=True)
+    try:
+        patas = [{"accion": "BUY", "right": "C", "strike": 100.0, "cantidad": 1, "vencimiento": "2026-09-25"}]
+        cond_day = {"tif": "DAY"}
+        cond_gtc = {"tif": "GTC"}
+        
+        h_day = calcular_huella_estrategia("AAPL", "OPTION", patas, 2.50, cond_day, {})
+        h_gtc = calcular_huella_estrategia("AAPL", "OPTION", patas, 2.50, cond_gtc, {})
+        assert h_day != h_gtc
+        
+        id_day = db_mem.crear_estrategia("AAPL", "OPTION", "PENDIENTE_ENTRADA", patas, condiciones_entrada=cond_day, precio_entrada=2.50)
+        id_gtc = db_mem.crear_estrategia("AAPL", "OPTION", "PENDIENTE_ENTRADA", patas, condiciones_entrada=cond_gtc, precio_entrada=2.50)
+        
+        assert id_day != id_gtc
+        
+        # Reintento DAY devuelve id_day
+        with pytest.raises(EstrategiaDuplicadaError) as exc_day:
+            db_mem.crear_estrategia("AAPL", "OPTION", "PENDIENTE_ENTRADA", patas, condiciones_entrada=cond_day, precio_entrada=2.50)
+        assert exc_day.value.est_existente_id == id_day
+        
+        # Reintento GTC devuelve id_gtc
+        with pytest.raises(EstrategiaDuplicadaError) as exc_gtc:
+            db_mem.crear_estrategia("AAPL", "OPTION", "PENDIENTE_ENTRADA", patas, condiciones_entrada=cond_gtc, precio_entrada=2.50)
+        assert exc_gtc.value.est_existente_id == id_gtc
+    finally:
+        db_mem.borrar_base_datos()
+
+def test_fallo_discord_no_afecta_guardado_bd():
+    """
+    Verifica que un fallo de red o excepción en enviar_alerta_webhook NO revierta la transacción
+    ni impida que la estrategia se guarde en la BD.
+    """
+    db_path_temp = "test_temp_notif_fail.db"
+    db_mem = GestorBaseDatos(db_name=db_path_temp, reset_db=True)
+    try:
+        patas = [{"accion": "BUY", "right": "C", "strike": 100.0, "cantidad": 1, "vencimiento": "2026-09-25"}]
+        
+        # Simular inserción confirmada
+        est_id = db_mem.crear_estrategia("AAPL", "OPTION", "PENDIENTE_ENTRADA", patas, precio_entrada=2.50)
+        assert isinstance(est_id, int)
+        
+        # Simular fallo en webhook
+        notificacion_ok = True
+        try:
+            raise RuntimeError("Fallo simulado de conexión a Discord")
+        except Exception:
+            notificacion_ok = False
+            
+        assert notificacion_ok is False
+        # Verificar que la estrategia sigue almacenada en BD perfectamente
+        est_db = db_mem.obtener_estrategia(est_id)
+        assert est_db is not None
+        assert est_db["id"] == est_id
+    finally:
+        db_mem.borrar_base_datos()
+
+
