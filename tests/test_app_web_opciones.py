@@ -494,4 +494,59 @@ def test_broker_esta_conectado_robustez():
             
     assert broker_esta_conectado(DummyBroker()) is True
 
+def test_procesar_encolado_opciones_sin_st_stop():
+    """
+    Verifica que procesar_encolado_opciones devuelva un diccionario con ok=False y mensaje descriptivo
+    ante:
+    - Falta de confirmación
+    - Precio límite 0.0
+    - Conflicto de signos crédito/débito
+    - Intento de duplicado
+    Sin lanzar excepciones unhandled ni requerir st.stop().
+    """
+    from app_web import procesar_encolado_opciones
+    from base_datos import GestorBaseDatos
+    
+    patas = [{"accion": "BUY", "right": "C", "strike": 100.0, "cantidad": 1, "vencimiento": "2026-09-25"}]
+    
+    # 1. Sin confirmación
+    res1 = procesar_encolado_opciones(False, "Mercado", None, 2.50, patas, {}, {}, "AAPL", "Única", False)
+    assert res1["ok"] is False
+    assert res1["tipo"] == "validacion"
+    assert "confirmación" in res1["mensaje"]
+    
+    # 2. Precio límite 0.0
+    res2 = procesar_encolado_opciones(True, "Crédito/Débito Neto", 0.0, 2.50, patas, {}, {}, "AAPL", "Única", False)
+    assert res2["ok"] is False
+    assert "0.0 USD" in res2["mensaje"]
+    
+    # 3. Conflicto de signos
+    res3 = procesar_encolado_opciones(True, "Crédito/Débito Neto", -2.50, 2.50, patas, {}, {}, "AAPL", "Única", False)
+    assert res3["ok"] is False
+    assert "Conflicto de signo" in res3["mensaje"]
+    
+    # 4. Duplicado bloqueado
+    db_path_temp = "test_temp_proc.db"
+    db_mem = GestorBaseDatos(db_name=db_path_temp, reset_db=True)
+    try:
+        # Primer intento exitoso
+        id1 = db_mem.crear_estrategia("AAPL", "OPTION", "PENDIENTE_ENTRADA", patas, precio_entrada=2.50)
+        assert isinstance(id1, int)
+        
+        # Inserción vía helper (debe retornar ok=False y tipo='duplicado')
+        import app_web
+        original_db = app_web.db
+        app_web.db = db_mem
+        try:
+            res_dup = procesar_encolado_opciones(True, "Crédito/Débito Neto", 2.50, 2.50, patas, {}, {}, "AAPL", "Única", False)
+            assert res_dup["ok"] is False
+            assert res_dup["tipo"] == "duplicado"
+            assert res_dup["id_existente"] == id1
+            assert "Estrategia Duplicada Bloqueada" in res_dup["mensaje"]
+        finally:
+            app_web.db = original_db
+    finally:
+        db_mem.borrar_base_datos()
+
+
 

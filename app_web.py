@@ -2286,7 +2286,6 @@ with tabs[2]:
     if "opt_error_vencimiento" in st.session_state:
         err_msg = st.session_state.pop("opt_error_vencimiento")
         st.error(err_msg)
-        st.stop()
 
     expirations = sorted(list(cadenas.keys()))
     if expirations:
@@ -2323,7 +2322,7 @@ with tabs[2]:
         venc_date = normalizar_vencimiento(opt_vencimiento_str)
     except ValueError as exc:
         st.error(str(exc))
-        st.stop()
+        venc_date = dt.date.today()
         
     days_to_exp = max((venc_date - fecha_valoracion).days, 0)
     T_inicial = days_to_exp / 365.0
@@ -2766,20 +2765,66 @@ with tabs[2]:
         col_g2.metric("Theta Neto Diario (Θ)", f"${theta_net:.2f}", help="Decaimiento temporal diario de la posición")
         col_g3.metric("Vega Neto (V)", f"${vega_net:.2f}", help="Sensibilidad respecto a cambios del 1% en Volatilidad")
         
-        # Muestra mensaje flash de encolado previo si existe (persistente hasta modificar o cerrar)
-        resultado_flash = st.session_state.get("_flash_encolado_opt")
-        if resultado_flash:
-            est_id_flash = resultado_flash["id"]
-            col_msg, col_cerrar = st.columns([0.92, 0.08])
-            with col_msg:
-                if resultado_flash.get("notificacion_ok", True):
-                    st.success(f"🚀 Estrategia de opciones #{est_id_flash} encolada correctamente en estado PENDIENTE_ENTRADA. Notificación telemétrica enviada a Discord.")
-                else:
-                    st.warning(f"🚀 Estrategia de opciones #{est_id_flash} encolada correctamente en estado PENDIENTE_ENTRADA (Nota: La notificación telemétrica a Discord no pudo enviarse).")
-            with col_cerrar:
-                if st.button("✖️", key="btn_cerrar_flash_opt"):
-                    st.session_state.pop("_flash_encolado_opt", None)
-                    st.rerun()
+def procesar_encolado_opciones(confirm_encolar, opt_tipo_lmt, opt_precio_entrada, credito_teorico_accion, patas_opciones, opt_cond_ent, opt_cond_sal, opt_ticker, opt_frecuencia, opt_permitir_duplicado):
+    """
+    Procesa la validación e inserción de la estrategia de opciones de forma aislada.
+    Devuelve un diccionario con el resultado sin interrumpir la ejecución global de Streamlit (sin st.stop).
+    """
+    if not confirm_encolar:
+        return {"ok": False, "tipo": "validacion", "mensaje": "⚠️ Debes marcar la casilla de confirmación antes de encolar la estrategia."}
+
+    if opt_tipo_lmt == "Crédito/Débito Neto":
+        if opt_precio_entrada is None or abs(opt_precio_entrada) < 1e-4:
+            return {"ok": False, "tipo": "validacion", "mensaje": "❌ El precio límite de entrada no puede ser 0.0 USD. Especifica una prima objetivo válida."}
+        if credito_teorico_accion > 0 and opt_precio_entrada < 0:
+            return {"ok": False, "tipo": "validacion", "mensaje": "❌ Conflicto de signo: La estrategia es de Crédito (+), pero ingresaste una prima objetivo de Débito (-)."}
+        elif credito_teorico_accion < 0 and opt_precio_entrada > 0:
+            return {"ok": False, "tipo": "validacion", "mensaje": "❌ Conflicto de signo: La estrategia es de Débito (-), pero ingresaste una prima objetivo de Crédito (+)."}
+
+    try:
+        patas_serializadas = []
+        for p in patas_opciones:
+            p_copy = p.copy()
+            venc_date_copy = normalizar_vencimiento(p_copy["vencimiento"])
+            p_copy["vencimiento"] = venc_date_copy.strftime('%Y-%m-%d')
+            patas_serializadas.append(p_copy)
+    except Exception as exc:
+        return {"ok": False, "tipo": "validacion", "mensaje": f"❌ Error en normalización de vencimiento: {exc}"}
+
+    tipo_act_est = "BAG" if len(patas_serializadas) > 1 else "OPTION"
+
+    try:
+        est_id = db.crear_estrategia(
+            ticker=opt_ticker,
+            tipo_activo=tipo_act_est,
+            estado="PENDIENTE_ENTRADA",
+            patas=patas_serializadas,
+            condiciones_entrada=opt_cond_ent if opt_cond_ent else None,
+            condiciones_salida=opt_cond_sal if opt_cond_sal else None,
+            precio_entrada=opt_precio_entrada,
+            permitir_duplicado=opt_permitir_duplicado
+        )
+        return {
+            "ok": True,
+            "id": est_id,
+            "tipo_act_est": tipo_act_est,
+            "patas_serializadas": patas_serializadas
+        }
+    except EstrategiaDuplicadaError as dup_err:
+        est_dup_id = dup_err.est_existente_id
+        db.registrar_evento("DUPLICADO_BLOQUEADO", f"Intento de encolar duplicado para {opt_ticker} bloqueado por huella canónica (ID existente #{est_dup_id}).")
+        return {
+            "ok": False,
+            "tipo": "duplicado",
+            "id_existente": est_dup_id,
+            "mensaje": f"⚠️ **Estrategia Duplicada Bloqueada:** Ya existe una estrategia idéntica pendiente o activa con ID #{est_dup_id}.\n\nMarca la casilla **'Permitir estrategia duplicada'** si deseas asumir conscientemente el riesgo acumulado de duplicar la posición."
+        }
+    except sqlite3.Error as sql_err:
+        return {
+            "ok": False,
+            "tipo": "base_datos",
+            "mensaje": f"❌ Error de Base de Datos al guardar estrategia: {sql_err}"
+        }
 
         # --- PARÁMETROS ALGORÍTMICOS Y ENVÍO ---
         st.divider()
@@ -2963,31 +3008,24 @@ with tabs[2]:
             )
         submit_opt = st.button("Encolar Estrategia Opciones", width="stretch", key="btn_encolar_opciones")
 
+        # Mensaje flash persistente desplegado inmediatamente debajo del botón de formulario
+        resultado_flash = st.session_state.get("_flash_encolado_opt")
+        if resultado_flash:
+            est_id_flash = resultado_flash["id"]
+            col_msg, col_cerrar = st.columns([0.92, 0.08])
+            with col_msg:
+                if resultado_flash.get("notificacion_ok", True):
+                    st.success(f"🚀 Estrategia de opciones #{est_id_flash} encolada correctamente en estado PENDIENTE_ENTRADA. Notificación enviada a Discord.")
+                else:
+                    st.warning(f"🚀 Estrategia de opciones #{est_id_flash} encolada correctamente en estado PENDIENTE_ENTRADA (Nota: La notificación telemétrica a Discord no pudo enviarse).")
+            with col_cerrar:
+                if st.button("✖️", key="btn_cerrar_flash_opt"):
+                    st.session_state.pop("_flash_encolado_opt", None)
+                    st.rerun()
+
         if submit_opt:
             st.session_state.pop("_flash_encolado_opt", None)
-            if not confirm_encolar:
-                st.warning("⚠️ Debes marcar la casilla de confirmación antes de encolar la estrategia.")
-                st.stop()
-
-            if opt_tipo_lmt == "Crédito/Débito Neto":
-                if opt_precio_entrada is None or abs(opt_precio_entrada) < 1e-4:
-                    st.error("❌ El precio límite de entrada no puede ser 0.0 USD. Especifica una prima objetivo válida.")
-                    st.stop()
-                if credito_teorico_accion > 0 and opt_precio_entrada < 0:
-                    st.error("❌ Conflicto de signo: La estrategia es de Crédito (+), pero ingresaste una prima objetivo de Débito (-).")
-                    st.stop()
-                elif credito_teorico_accion < 0 and opt_precio_entrada > 0:
-                    st.error("❌ Conflicto de signo: La estrategia es de Débito (-), pero ingresaste una prima objetivo de Crédito (+).")
-                    st.stop()
-
-            # Serializamos las patas centralizando con normalizar_vencimiento
-            patas_serializadas = []
-            for p in st.session_state["patas_opciones"]:
-                p_copy = p.copy()
-                venc_date_copy = normalizar_vencimiento(p_copy["vencimiento"])
-                p_copy["vencimiento"] = venc_date_copy.strftime('%Y-%m-%d')
-                patas_serializadas.append(p_copy)
-
+            
             # Construimos condiciones de entrada
             opt_cond_ent = {}
             if opt_act_horario:
@@ -3017,54 +3055,51 @@ with tabs[2]:
             if opt_act_hora_sal:
                 opt_cond_sal["cierre_horario"] = opt_hora_sal
 
-            tipo_act_est = "BAG" if len(patas_serializadas) > 1 else "OPTION"
+            res = procesar_encolado_opciones(
+                confirm_encolar=confirm_encolar,
+                opt_tipo_lmt=opt_tipo_lmt,
+                opt_precio_entrada=opt_precio_entrada,
+                credito_teorico_accion=credito_teorico_accion,
+                patas_opciones=st.session_state["patas_opciones"],
+                opt_cond_ent=opt_cond_ent,
+                opt_cond_sal=opt_cond_sal,
+                opt_ticker=opt_ticker,
+                opt_frecuencia=opt_frecuencia,
+                opt_permitir_duplicado=opt_permitir_duplicado
+            )
 
-            # 1. Intentar INSERT en base de datos de forma transaccional e independiente
-            try:
-                est_id = db.crear_estrategia(
-                    ticker=opt_ticker,
-                    tipo_activo=tipo_act_est,
-                    estado="PENDIENTE_ENTRADA",
-                    patas=patas_serializadas,
-                    condiciones_entrada=opt_cond_ent if opt_cond_ent else None,
-                    condiciones_salida=opt_cond_sal if opt_cond_sal else None,
-                    precio_entrada=opt_precio_entrada,
-                    permitir_duplicado=opt_permitir_duplicado
-                )
-            except EstrategiaDuplicadaError as dup_err:
-                est_dup_id = dup_err.est_existente_id
-                st.warning(f"⚠️ **Estrategia Duplicada Bloqueada:** Ya existe una estrategia idéntica pendiente o activa con ID #{est_dup_id}.\n\nMarca la casilla **'Permitir estrategia duplicada'** si deseas asumir conscientemente el riesgo acumulado de duplicar la posición.")
-                db.registrar_evento("DUPLICADO_BLOQUEADO", f"Intento de encolar duplicado para {opt_ticker} bloqueado por huella canónica (ID existente #{est_dup_id}).")
-                st.stop()
-            except sqlite3.Error as sql_err:
-                st.error(f"❌ Error de Base de Datos al guardar estrategia: {sql_err}")
-                st.stop()
+            if not res["ok"]:
+                if res["tipo"] == "duplicado":
+                    st.warning(res["mensaje"])
+                else:
+                    st.error(res["mensaje"])
+            else:
+                est_id = res["id"]
+                tipo_act_est = res["tipo_act_est"]
+                patas_serializadas = res["patas_serializadas"]
 
-            # 2. Inserción CONFIRMADA
-            db.registrar_evento("CREACION_ESTRATEGIA_UI", f"Estrategia #{est_id} de opciones ({opt_ticker}) encolada.")
+                db.registrar_evento("CREACION_ESTRATEGIA_UI", f"Estrategia #{est_id} de opciones ({opt_ticker}) encolada.")
 
-            # 3. Intentar notificación Discord independientemente utilizando comprobación centralizada
-            notificacion_ok = True
-            try:
-                conectado = broker_esta_conectado(broker_global)
-                modo_red = "ONLINE (IBKR conectado)" if conectado else "OFFLINE / NO TRANSMITIDA"
-                enviar_alerta_webhook(
-                    titulo=f"📥 Nueva Estrategia Encolada (Opciones) [{modo_red}]",
-                    mensaje=f"**ID:** #{est_id}\n**Ticker:** {opt_ticker}\n**Tipo:** {tipo_act_est}\n**Patas:** {len(patas_serializadas)} patas\n**Precio Objetivo:** {opt_precio_entrada if opt_precio_entrada else 'Mercado'}\n**Frecuencia:** {opt_frecuencia}\n**Modo:** {modo_red}",
-                    color="info"
-                )
-            except Exception as notif_err:
-                notificacion_ok = False
-                db.registrar_evento("ERROR_DISCORD", f"Error al enviar notificación Discord para estrategia #{est_id}: {notif_err}")
+                notificacion_ok = True
+                try:
+                    conectado = broker_esta_conectado(broker_global)
+                    modo_red = "ONLINE (IBKR conectado)" if conectado else "OFFLINE / NO TRANSMITIDA"
+                    enviar_alerta_webhook(
+                        titulo=f"📥 Nueva Estrategia Encolada (Opciones) [{modo_red}]",
+                        mensaje=f"**ID:** #{est_id}\n**Ticker:** {opt_ticker}\n**Tipo:** {tipo_act_est}\n**Patas:** {len(patas_serializadas)} patas\n**Precio Objetivo:** {opt_precio_entrada if opt_precio_entrada else 'Mercado'}\n**Frecuencia:** {opt_frecuencia}\n**Modo:** {modo_red}",
+                        color="info"
+                    )
+                except Exception as notif_err:
+                    notificacion_ok = False
+                    db.registrar_evento("ERROR_DISCORD", f"Error al enviar notificación Discord para estrategia #{est_id}: {notif_err}")
 
-            # 4. Activar reinicio diferido, guardar estado flash y ejecutar st.rerun()
-            st.session_state["_reset_confirm_encolar_opt"] = True
-            st.session_state["_reset_permitir_dup_opt"] = True
-            st.session_state["_flash_encolado_opt"] = {
-                "id": est_id,
-                "notificacion_ok": notificacion_ok
-            }
-            st.rerun()
+                st.session_state["_reset_confirm_encolar_opt"] = True
+                st.session_state["_reset_permitir_dup_opt"] = True
+                st.session_state["_flash_encolado_opt"] = {
+                    "id": est_id,
+                    "notificacion_ok": notificacion_ok
+                }
+                st.rerun()
 
 
 # ==========================================
