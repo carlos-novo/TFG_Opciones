@@ -2343,11 +2343,15 @@ with tabs[2]:
                 precio_ref_calc = 100.0
             
         try:
-            venc_date = datetime.strptime(opt_vencimiento_str, "%Y-%m-%d").date()
+            if isinstance(opt_vencimiento_str, date):
+                venc_date = opt_vencimiento_str
+            else:
+                venc_date = datetime.strptime(str(opt_vencimiento_str).split(" ")[0].strip(), "%Y-%m-%d").date()
         except Exception:
-            venc_date = date.today()
-        days_to_exp = (venc_date - date.today()).days
-        T_calc = max(days_to_exp, 1) / 365.0
+            venc_date = date.today() + timedelta(days=30)
+            
+        days_to_exp = max((venc_date - date.today()).days, 1)
+        T_calc = days_to_exp / 365.0
         
         # Calcular la prima usando Black-Scholes (sincronizado con la volatilidad y tasa de los sliders)
         sigma_calc = float(st.session_state.get("opt_vol_sim", 25)) / 100.0
