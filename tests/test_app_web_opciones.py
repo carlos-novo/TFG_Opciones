@@ -25,6 +25,16 @@ def normalizar_vencimiento(valor):
 
     raise ValueError(f"Formato de vencimiento no reconocido: {valor!r}")
 
+def test_ausencia_referencias_t_calc_en_codigo():
+    """
+    Verifica que no queden referencias desfasadas a 'T_calc' en app_web.py.
+    """
+    ruta_app = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'app_web.py'))
+    with open(ruta_app, 'r', encoding='utf-8') as f:
+        contenido = f.read()
+    
+    assert "T_calc" not in contenido, "Se encontró la variable obsoleta 'T_calc' en app_web.py"
+
 def test_normalizar_vencimiento_formatos():
     """
     Verifica que normalizar_vencimiento procese correctamente:
@@ -113,14 +123,14 @@ def test_casos_aceptacion_opciones_multileg():
 
 def test_separacion_prima_teorica_y_precio_entrada():
     """
-    Verifica que prima_teorica sea la fuente para payoff y metricas
+    Verifica que prima_teorica sea la fuente para payoff y metricas en previsualización
     mientras que precio_entrada se reserve para ejecuciones reales.
     """
     patas = [
-        {"tipo_activo": "OPTION", "accion": "BUY", "cantidad": 1, "strike": 317.5, "right": "P", "prima_teorica": 0.0994},
-        {"tipo_activo": "OPTION", "accion": "SELL", "cantidad": 1, "strike": 322.5, "right": "P", "prima_teorica": 0.9776},
-        {"tipo_activo": "OPTION", "accion": "SELL", "cantidad": 1, "strike": 327.5, "right": "C", "prima_teorica": 0.5330},
-        {"tipo_activo": "OPTION", "accion": "BUY", "cantidad": 1, "strike": 332.5, "right": "C", "prima_teorica": 0.0433}
+        {"tipo_activo": "OPTION", "accion": "BUY", "cantidad": 1, "strike": 317.5, "right": "P", "prima_teorica": 0.0994, "modo": "TEORICO"},
+        {"tipo_activo": "OPTION", "accion": "SELL", "cantidad": 1, "strike": 322.5, "right": "P", "prima_teorica": 0.9776, "modo": "TEORICO"},
+        {"tipo_activo": "OPTION", "accion": "SELL", "cantidad": 1, "strike": 327.5, "right": "C", "prima_teorica": 0.5330, "modo": "TEORICO"},
+        {"tipo_activo": "OPTION", "accion": "BUY", "cantidad": 1, "strike": 332.5, "right": "C", "prima_teorica": 0.0433, "modo": "TEORICO"}
     ]
     
     payoff_data = MotorBlackScholes.calcular_payoff_estrategia(patas, T=0, r=0.05, sigma=0.25, precio_min=300, precio_max=350, puntos=50)
@@ -156,17 +166,28 @@ def test_pnl_simulado_en_spot_igual_cero():
         
     assert math.isclose(pnl_simulado, 0.0, abs_tol=1e-5)
 
-def test_modo_ejecutado_vs_teorico():
+def test_obtener_prima_pata_estricta_excepciones():
     """
-    Verifica que en modo EJECUTADO se use precio_entrada real y en modo TEORICO se use prima_teorica.
+    Verifica que obtener_prima_pata requiera obligatoriamente:
+    - precio_entrada en modo EJECUTADO (o lanza ValueError).
+    - prima_teorica en modo TEORICO (o lanza ValueError).
+    - Lanza ValueError en modos desconocidos.
     """
-    pata = {"prima_teorica": 2.50, "precio_entrada": 3.00}
+    pata_sin_entrada = {"prima_teorica": 2.50}
+    pata_sin_teorica = {"precio_entrada": 3.00}
+    pata_completa = {"prima_teorica": 2.50, "precio_entrada": 3.00}
     
-    prima_teorica = MotorEstrategias.obtener_prima_pata(pata, modo="TEORICO")
-    prima_ejecutada = MotorEstrategias.obtener_prima_pata(pata, modo="EJECUTADO")
+    assert MotorEstrategias.obtener_prima_pata(pata_completa, modo="TEORICO") == 2.50
+    assert MotorEstrategias.obtener_prima_pata(pata_completa, modo="EJECUTADO") == 3.00
     
-    assert prima_teorica == 2.50
-    assert prima_ejecutada == 3.00
+    with pytest.raises(ValueError, match="precio_entrada confirmado"):
+        MotorEstrategias.obtener_prima_pata(pata_sin_entrada, modo="EJECUTADO")
+        
+    with pytest.raises(ValueError, match="prima_teorica"):
+        MotorEstrategias.obtener_prima_pata(pata_sin_teorica, modo="TEORICO")
+        
+    with pytest.raises(ValueError, match="Modo de prima no reconocido"):
+        MotorEstrategias.obtener_prima_pata(pata_completa, modo="MODO_INVALIDO")
 
 def test_independencia_dias_sim_y_primas_iniciales():
     """
@@ -183,8 +204,36 @@ def test_independencia_dias_sim_y_primas_iniciales():
     T_escenario = 10.0 / 365.0
     griegas_escenario = MotorBlackScholes.calcular_greeks(S, 322.5, T_escenario, r, sigma, 'P')
     
-    # La prima inicial se conserva constante
     assert prima_init == MotorBlackScholes.calcular_prima_bs(S, 322.5, T_inicial, r, sigma, 'P')
-    # Las griegas del escenario varian con T_escenario
     griegas_init = MotorBlackScholes.calcular_greeks(S, 322.5, T_inicial, r, sigma, 'P')
     assert griegas_escenario["theta"] != griegas_init["theta"]
+
+def test_flujo_renderizado_sin_nameerror():
+    """
+    Simula la ejecución del bucle de patas de app_web.py (línea 2402)
+    para verificar que T_inicial reemplaza correctamente a T_calc sin NameError.
+    """
+    spot_ref = 324.14
+    days_to_exp = 22
+    T_inicial = days_to_exp / 365.0
+    r_calc = 0.05
+    sigma_calc = 0.25
+    
+    patas = [
+        {"strike": 317.5, "right": "P", "accion": "BUY", "cantidad": 1},
+        {"strike": 322.5, "right": "P", "accion": "SELL", "cantidad": 1},
+        {"strike": 327.5, "right": "C", "accion": "SELL", "cantidad": 1},
+        {"strike": 332.5, "right": "C", "accion": "BUY", "cantidad": 1}
+    ]
+    
+    for pata in patas:
+        premium_bs = MotorBlackScholes.calcular_prima_bs(
+            S=spot_ref,
+            K=float(pata["strike"]),
+            T=T_inicial,
+            r=r_calc,
+            sigma=sigma_calc,
+            tipo=pata["right"]
+        )
+        pata["prima_teorica"] = float(premium_bs)
+        assert pata["prima_teorica"] > 0

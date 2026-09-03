@@ -11,14 +11,19 @@ class MotorEstrategias:
     def obtener_prima_pata(pata, modo="TEORICO"):
         """
         Obtiene la prima de referencia de una pata en función del modo de operación:
-        - modo="EJECUTADO": Prioriza precio_entrada (precio real confirmado por bróker).
-        - modo="TEORICO": Prioriza prima_teorica (estimación Black-Scholes).
+        - modo="EJECUTADO": Requiere precio_entrada confirmado.
+        - modo="TEORICO": Requiere prima_teorica calculada.
         """
-        if modo == "EJECUTADO" and pata.get("precio_entrada") is not None:
+        modo = str(modo).upper()
+        if modo == "EJECUTADO":
+            if pata.get("precio_entrada") is None:
+                raise ValueError("Una pata ejecutada requiere precio_entrada confirmado")
             return float(pata["precio_entrada"])
-        elif pata.get("prima_teorica") is not None:
+        if modo == "TEORICO":
+            if pata.get("prima_teorica") is None:
+                raise ValueError("La previsualización requiere prima_teorica")
             return float(pata["prima_teorica"])
-        return float(pata.get("precio_entrada", 0.0))
+        raise ValueError(f"Modo de prima no reconocido: {modo}")
 
     @staticmethod
     def calcular_credito_real_iron_condor(gestor, ticker, vencimiento, p_long, p_short, c_short, c_long):

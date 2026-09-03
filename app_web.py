@@ -2259,13 +2259,18 @@ with tabs[2]:
                 try:
                     from zoneinfo import ZoneInfo
                     fecha_val = dt.datetime.now(ZoneInfo("America/New_York")).date()
-                except Exception:
+                except (ImportError, Exception):
                     fecha_val = dt.date.today()
                 days_calc = max((venc_date_val - fecha_val).days, 0)
                 st.session_state["opt_dias_sim"] = days_calc
-            except Exception:
-                pass
+            except ValueError as exc:
+                st.session_state["opt_error_vencimiento"] = str(exc)
         invalidar_valoracion()
+
+    if "opt_error_vencimiento" in st.session_state:
+        err_msg = st.session_state.pop("opt_error_vencimiento")
+        st.error(err_msg)
+        st.stop()
 
     expirations = sorted(list(cadenas.keys()))
     if expirations:
@@ -2313,8 +2318,12 @@ with tabs[2]:
     vol_sim = c_sl1.slider("Volatilidad Implícita (σ)", min_value=5, max_value=150, value=25, step=5, format="%d%%", key="opt_vol_sim", on_change=invalidar_valoracion) / 100.0
     
     max_dias_sim = max(days_to_exp, 1)
-    val_dias_sim = min(int(st.session_state.get("opt_dias_sim", days_to_exp)), max_dias_sim)
-    dias_sim = c_sl2.slider("Días Restantes del Escenario Simulado", min_value=0, max_value=max_dias_sim, value=val_dias_sim, step=1, key="opt_dias_sim", on_change=invalidar_valoracion)
+    if "opt_dias_sim" not in st.session_state:
+        st.session_state["opt_dias_sim"] = days_to_exp
+    else:
+        st.session_state["opt_dias_sim"] = min(max(int(st.session_state["opt_dias_sim"]), 0), max_dias_sim)
+
+    dias_sim = c_sl2.slider("Días Restantes del Escenario Simulado", min_value=0, max_value=max_dias_sim, step=1, key="opt_dias_sim", on_change=invalidar_valoracion)
     tasa_sim = c_sl3.slider("Tasa Libre de Riesgo (r)", min_value=0.0, max_value=15.0, value=5.0, step=0.5, format="%.1f%%", key="opt_tasa_sim", on_change=invalidar_valoracion) / 100.0
 
     T_escenario = max(dias_sim / 365.0, 0.0)
@@ -2393,13 +2402,13 @@ with tabs[2]:
             label_visibility="collapsed"
         )
         
-        # 5. Calcular Prima Teórica (Black-Scholes) con el spot único consolidado
+        # 5. Calcular Prima Teórica (Black-Scholes) con el spot único consolidado y T_inicial
         sigma_calc = float(st.session_state.get("opt_vol_sim", 25)) / 100.0
         r_calc = float(st.session_state.get("opt_tasa_sim", 5.0)) / 100.0
         premium_bs = MotorBlackScholes.calcular_prima_bs(
             S=spot_ref,
             K=float(pata["strike"]),
-            T=T_calc,
+            T=T_inicial,
             r=r_calc,
             sigma=sigma_calc,
             tipo=pata["right"]

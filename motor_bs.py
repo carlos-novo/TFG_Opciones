@@ -101,17 +101,20 @@ class MotorBlackScholes:
         """
         Calcula el P&L teórico para un rango de precios del subyacente S
         para una combinación de patas genéricas (opciones y/o acciones),
-        tanto a vencimiento (T=0) como antes de vencimiento (T > 0).
         """
         S_rango = np.linspace(precio_min, precio_max, puntos)
         pnl_vencimiento = np.zeros_like(S_rango)
         pnl_temporal = np.zeros_like(S_rango)
-        
         for pata in patas:
             tipo = pata.get("tipo_activo", "OPTION").upper()
             accion = pata.get("accion", "BUY").upper()
             cantidad = int(pata.get("cantidad", 1))
-            precio_ent = float(pata.get("prima_teorica") if pata.get("prima_teorica") is not None else pata.get("precio_entrada", 0.0))
+            if pata.get("prima_teorica") is not None:
+                precio_ent = float(pata["prima_teorica"])
+            elif pata.get("precio_entrada") is not None:
+                precio_ent = float(pata["precio_entrada"])
+            else:
+                raise ValueError("La pata no cuenta con precio_entrada ni prima_teorica")
             
             dir_mult = 1 if accion == "BUY" else -1
             
