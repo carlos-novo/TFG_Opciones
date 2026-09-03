@@ -2322,6 +2322,8 @@ with tabs[2]:
         # 5. Calcular Prima Teórica (Black-Scholes) y fijar automáticamente
         if "opt_vol_sim" not in st.session_state:
             st.session_state["opt_vol_sim"] = 25
+        if "opt_tasa_sim" not in st.session_state:
+            st.session_state["opt_tasa_sim"] = 5.0
             
         precio_ref_calc = st.session_state.get("precio_subyacente_opt")
         if precio_ref_calc is None or precio_ref_calc <= 0:
@@ -2339,13 +2341,14 @@ with tabs[2]:
         days_to_exp = (venc_date - date.today()).days
         T_calc = max(days_to_exp, 1) / 365.0
         
-        # Calcular la prima usando Black-Scholes (sincronizado con la volatilidad del slider)
+        # Calcular la prima usando Black-Scholes (sincronizado con la volatilidad y tasa de los sliders)
         sigma_calc = float(st.session_state.get("opt_vol_sim", 25)) / 100.0
+        r_calc = float(st.session_state.get("opt_tasa_sim", 5.0)) / 100.0
         premium_bs = MotorBlackScholes.calcular_prima_bs(
             S=precio_ref_calc,
             K=float(pata["strike"]),
             T=T_calc,
-            r=0.04,
+            r=r_calc,
             sigma=sigma_calc,
             tipo=pata["right"]
         )
@@ -2353,7 +2356,7 @@ with tabs[2]:
         pata["precio_entrada"] = premium_bs
         
         # Sincronizar explícitamente st.session_state para evitar caché obsoleto en campos deshabilitados
-        leg_p_key = f"leg_p_{idx}_{pata['strike']}_{pata['right']}_{opt_vencimiento_str}_{sigma_calc}"
+        leg_p_key = f"leg_p_{idx}_{pata['strike']}_{pata['right']}_{opt_vencimiento_str}_{sigma_calc}_{r_calc}"
         st.session_state[leg_p_key] = float(pata["precio_entrada"])
         
         # Mostrar la prima como campo de solo lectura (deshabilitado)
