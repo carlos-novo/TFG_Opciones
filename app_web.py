@@ -2230,6 +2230,21 @@ with tabs[2]:
         
         cadenas = {exp: strikes_simulados for exp in fridays}
 
+    def normalizar_vencimiento(valor):
+        if isinstance(valor, datetime):
+            return valor.date()
+        if isinstance(valor, date):
+            return valor
+
+        texto = str(valor).strip().split(" ")[0]
+        for formato in ("%Y-%m-%d", "%Y%m%d"):
+            try:
+                return datetime.strptime(texto, formato).date()
+            except ValueError:
+                continue
+
+        raise ValueError(f"Formato de vencimiento no reconocido: {valor!r}")
+
     def invalidar_valoracion():
         for leg in st.session_state.get("patas_opciones", []):
             leg.pop("precio_entrada", None)
@@ -2255,11 +2270,21 @@ with tabs[2]:
         
     strikes_disponibles = sorted([float(s) for s in cadenas.get(opt_vencimiento_str, [100.0])])
     
-    st.subheader("Análisis de Sensibilidad Teórico (Black-Scholes)")
-    st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Mueve los deslizadores para ver el efecto del paso del tiempo y la volatilidad implícita en las primas y en la curva teórica.</p>", unsafe_allow_html=True)
+    try:
+        from zoneinfo import ZoneInfo
+        fecha_val_global = datetime.now(ZoneInfo("America/New_York")).date()
+    except Exception:
+        fecha_val_global = date.today()
+
+    try:
+        venc_date_global = normalizar_vencimiento(opt_vencimiento_str)
+        dias_default = max((venc_date_global - fecha_val_global).days, 0)
+    except Exception:
+        dias_default = 45
+
     c_sl1, c_sl2, c_sl3 = st.columns(3)
     vol_sim = c_sl1.slider("Volatilidad Implícita (σ)", min_value=5, max_value=150, value=25, step=5, format="%d%%", key="opt_vol_sim", on_change=invalidar_valoracion) / 100.0
-    dias_sim = c_sl2.slider("Días al Vencimiento (T)", min_value=0, max_value=365, value=45, step=1, key="opt_dias_sim", on_change=invalidar_valoracion)
+    dias_sim = c_sl2.slider("Días al Vencimiento (T)", min_value=0, max_value=365, value=dias_default, step=1, key="opt_dias_sim", on_change=invalidar_valoracion)
     tasa_sim = c_sl3.slider("Tasa Libre de Riesgo (r)", min_value=0.0, max_value=15.0, value=5.0, step=0.5, format="%.1f%%", key="opt_tasa_sim", on_change=invalidar_valoracion) / 100.0
     
     st.divider()
@@ -2357,13 +2382,18 @@ with tabs[2]:
         except Exception:
             fecha_valoracion = date.today()
 
+        if idx == 0:
+            st.error(
+                f"expiry raw={opt_vencimiento_str!r}, "
+                f"type={type(opt_vencimiento_str)}, "
+                f"fecha_valoracion={fecha_valoracion!r}"
+            )
+
         try:
-            if isinstance(opt_vencimiento_str, date):
-                venc_date = opt_vencimiento_str
-            else:
-                venc_date = datetime.strptime(str(opt_vencimiento_str).split(" ")[0].strip(), "%Y-%m-%d").date()
-        except Exception:
-            venc_date = fecha_valoracion
+            venc_date = normalizar_vencimiento(opt_vencimiento_str)
+        except ValueError as exc:
+            st.error(str(exc))
+            st.stop()
             
         days_to_exp = max((venc_date - fecha_valoracion).days, 0)
         T_calc = days_to_exp / 365.0
