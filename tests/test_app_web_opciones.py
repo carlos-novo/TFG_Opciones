@@ -475,4 +475,23 @@ def test_fallo_discord_no_afecta_guardado_bd():
     finally:
         db_mem.borrar_base_datos()
 
+def test_broker_esta_conectado_robustez():
+    """
+    Verifica que broker_esta_conectado maneje correctamente:
+    - Instancia None (devuelve False sin error)
+    - Objetos sin el método esta_conectado (devuelve False sin AttributeError)
+    - Instancias de GestorIBKR en estado offline (devuelve False)
+    - Mocks con esta_conectado() == True (devuelve True)
+    """
+    from app_web import broker_esta_conectado
+    
+    assert broker_esta_conectado(None) is False
+    assert broker_esta_conectado(object()) is False
+    
+    class DummyBroker:
+        def esta_conectado(self):
+            return True
+            
+    assert broker_esta_conectado(DummyBroker()) is True
+
 

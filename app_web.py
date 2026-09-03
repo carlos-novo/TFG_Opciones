@@ -27,6 +27,22 @@ def obtener_broker_global():
 
 broker_global = obtener_broker_global()
 
+def broker_esta_conectado(broker):
+    """
+    Comprueba de forma segura si la instancia del broker está conectada a IBKR.
+    Devuelve False si broker es None, si no tiene la sesión o si lanza cualquier excepción.
+    """
+    if broker is None:
+        return False
+    try:
+        if hasattr(broker, "esta_conectado"):
+            return bool(broker.esta_conectado())
+        elif hasattr(broker, "ib") and broker.ib is not None:
+            return bool(broker.ib.isConnected())
+    except Exception:
+        return False
+    return False
+
 # --- INICIALIZACIÓN GLOBAL DE WATCHDOGS (HITO 4) ---
 @st.cache_resource(on_release=lambda x: detener_watchdogs())
 def iniciar_watchdogs_globales(_broker):
@@ -2750,14 +2766,20 @@ with tabs[2]:
         col_g2.metric("Theta Neto Diario (Θ)", f"${theta_net:.2f}", help="Decaimiento temporal diario de la posición")
         col_g3.metric("Vega Neto (V)", f"${vega_net:.2f}", help="Sensibilidad respecto a cambios del 1% en Volatilidad")
         
-        # Muestra mensaje flash de encolado previo si existe
-        resultado_flash = st.session_state.pop("_flash_encolado_opt", None)
+        # Muestra mensaje flash de encolado previo si existe (persistente hasta modificar o cerrar)
+        resultado_flash = st.session_state.get("_flash_encolado_opt")
         if resultado_flash:
             est_id_flash = resultado_flash["id"]
-            if resultado_flash.get("notificacion_ok", True):
-                st.success(f"🚀 Estrategia de opciones #{est_id_flash} encolada correctamente en estado PENDIENTE_ENTRADA.")
-            else:
-                st.warning(f"🚀 Estrategia de opciones #{est_id_flash} encolada en estado PENDIENTE_ENTRADA (Nota: La notificación telemétrica a Discord no pudo enviarse).")
+            col_msg, col_cerrar = st.columns([0.92, 0.08])
+            with col_msg:
+                if resultado_flash.get("notificacion_ok", True):
+                    st.success(f"🚀 Estrategia de opciones #{est_id_flash} encolada correctamente en estado PENDIENTE_ENTRADA. Notificación telemétrica enviada a Discord.")
+                else:
+                    st.warning(f"🚀 Estrategia de opciones #{est_id_flash} encolada correctamente en estado PENDIENTE_ENTRADA (Nota: La notificación telemétrica a Discord no pudo enviarse).")
+            with col_cerrar:
+                if st.button("✖️", key="btn_cerrar_flash_opt"):
+                    st.session_state.pop("_flash_encolado_opt", None)
+                    st.rerun()
 
         # --- PARÁMETROS ALGORÍTMICOS Y ENVÍO ---
         st.divider()
@@ -2942,6 +2964,7 @@ with tabs[2]:
         submit_opt = st.button("Encolar Estrategia Opciones", width="stretch", key="btn_encolar_opciones")
 
         if submit_opt:
+            st.session_state.pop("_flash_encolado_opt", None)
             if not confirm_encolar:
                 st.warning("⚠️ Debes marcar la casilla de confirmación antes de encolar la estrategia.")
                 st.stop()
@@ -3020,10 +3043,11 @@ with tabs[2]:
             # 2. Inserción CONFIRMADA
             db.registrar_evento("CREACION_ESTRATEGIA_UI", f"Estrategia #{est_id} de opciones ({opt_ticker}) encolada.")
 
-            # 3. Intentar notificación Discord independientemente (sin afectar el guardado en BD)
+            # 3. Intentar notificación Discord independientemente utilizando comprobación centralizada
             notificacion_ok = True
             try:
-                modo_red = "ONLINE (IBKR Conectado)" if (broker_global and broker_global.conectado) else "OFFLINE / NO TRANSMITIDA"
+                conectado = broker_esta_conectado(broker_global)
+                modo_red = "ONLINE (IBKR conectado)" if conectado else "OFFLINE / NO TRANSMITIDA"
                 enviar_alerta_webhook(
                     titulo=f"📥 Nueva Estrategia Encolada (Opciones) [{modo_red}]",
                     mensaje=f"**ID:** #{est_id}\n**Ticker:** {opt_ticker}\n**Tipo:** {tipo_act_est}\n**Patas:** {len(patas_serializadas)} patas\n**Precio Objetivo:** {opt_precio_entrada if opt_precio_entrada else 'Mercado'}\n**Frecuencia:** {opt_frecuencia}\n**Modo:** {modo_red}",
