@@ -2230,6 +2230,14 @@ with tabs[2]:
         
         cadenas = {exp: strikes_simulados for exp in fridays}
 
+    def invalidar_valoracion():
+        for leg in st.session_state.get("patas_opciones", []):
+            leg.pop("precio_entrada", None)
+            leg.pop("prima_teorica", None)
+            leg.pop("greeks", None)
+        for key in ("payoff_data", "figura_payoff", "credito_neto", "opt_payoff_fig"):
+            st.session_state.pop(key, None)
+
     expirations = sorted(list(cadenas.keys()))
     if expirations:
         val_default = expirations[0]
@@ -2239,7 +2247,8 @@ with tabs[2]:
             "Selecciona la Fecha de Vencimiento de la Estrategia", 
             options=expirations, 
             index=expirations.index(val_default),
-            key="opt_global_vencimiento"
+            key="opt_global_vencimiento",
+            on_change=invalidar_valoracion
         )
     else:
         opt_vencimiento_str = date.today().strftime("%Y-%m-%d")
@@ -2249,9 +2258,9 @@ with tabs[2]:
     st.subheader("Análisis de Sensibilidad Teórico (Black-Scholes)")
     st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Mueve los deslizadores para ver el efecto del paso del tiempo y la volatilidad implícita en las primas y en la curva teórica.</p>", unsafe_allow_html=True)
     c_sl1, c_sl2, c_sl3 = st.columns(3)
-    vol_sim = c_sl1.slider("Volatilidad Implícita (σ)", min_value=5, max_value=150, value=25, step=5, format="%d%%", key="opt_vol_sim") / 100.0
-    dias_sim = c_sl2.slider("Días al Vencimiento (T)", min_value=0, max_value=365, value=45, step=1, key="opt_dias_sim")
-    tasa_sim = c_sl3.slider("Tasa Libre de Riesgo (r)", min_value=0.0, max_value=15.0, value=5.0, step=0.5, format="%.1f%%", key="opt_tasa_sim") / 100.0
+    vol_sim = c_sl1.slider("Volatilidad Implícita (σ)", min_value=5, max_value=150, value=25, step=5, format="%d%%", key="opt_vol_sim", on_change=invalidar_valoracion) / 100.0
+    dias_sim = c_sl2.slider("Días al Vencimiento (T)", min_value=0, max_value=365, value=45, step=1, key="opt_dias_sim", on_change=invalidar_valoracion)
+    tasa_sim = c_sl3.slider("Tasa Libre de Riesgo (r)", min_value=0.0, max_value=15.0, value=5.0, step=0.5, format="%.1f%%", key="opt_tasa_sim", on_change=invalidar_valoracion) / 100.0
     
     st.divider()
     st.subheader("Configuración de las Patas (Legs)")
@@ -2343,14 +2352,20 @@ with tabs[2]:
                 precio_ref_calc = 100.0
             
         try:
+            from zoneinfo import ZoneInfo
+            fecha_valoracion = datetime.now(ZoneInfo("America/New_York")).date()
+        except Exception:
+            fecha_valoracion = date.today()
+
+        try:
             if isinstance(opt_vencimiento_str, date):
                 venc_date = opt_vencimiento_str
             else:
                 venc_date = datetime.strptime(str(opt_vencimiento_str).split(" ")[0].strip(), "%Y-%m-%d").date()
         except Exception:
-            venc_date = date.today() + timedelta(days=30)
+            venc_date = fecha_valoracion
             
-        days_to_exp = max((venc_date - date.today()).days, 1)
+        days_to_exp = max((venc_date - fecha_valoracion).days, 0)
         T_calc = days_to_exp / 365.0
         
         # Calcular la prima usando Black-Scholes (sincronizado con la volatilidad y tasa de los sliders)
