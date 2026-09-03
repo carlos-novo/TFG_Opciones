@@ -2246,6 +2246,14 @@ with tabs[2]:
         
     strikes_disponibles = sorted([float(s) for s in cadenas.get(opt_vencimiento_str, [100.0])])
     
+    st.subheader("Análisis de Sensibilidad Teórico (Black-Scholes)")
+    st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Mueve los deslizadores para ver el efecto del paso del tiempo y la volatilidad implícita en las primas y en la curva teórica.</p>", unsafe_allow_html=True)
+    c_sl1, c_sl2, c_sl3 = st.columns(3)
+    vol_sim = c_sl1.slider("Volatilidad Implícita (σ)", min_value=5, max_value=150, value=25, step=5, format="%d%%", key="opt_vol_sim") / 100.0
+    dias_sim = c_sl2.slider("Días al Vencimiento (T)", min_value=0, max_value=365, value=45, step=1, key="opt_dias_sim")
+    tasa_sim = c_sl3.slider("Tasa Libre de Riesgo (r)", min_value=0.0, max_value=15.0, value=5.0, step=0.5, format="%.1f%%", key="opt_tasa_sim") / 100.0
+    
+    st.divider()
     st.subheader("Configuración de las Patas (Legs)")
     
     # Renderizamos una única cabecera para toda la tabla
@@ -2475,17 +2483,8 @@ with tabs[2]:
     </script>
     """, height=0, width=0)
         
-    # --- GRÁFICO INTERACTIVO DE PLOTLY (SENSIVILIDAD Y VALOR TEMPORAL) ---
+    # --- GRÁFICO INTERACTIVO DE PLOTLY (SENSIBILIDAD Y VALOR TEMPORAL) ---
     if st.session_state["patas_opciones"]:
-        st.divider()
-        st.subheader("Análisis de Sensibilidad Teórico (Black-Scholes)")
-        st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Mueve los deslizadores para ver el efecto del paso del tiempo y la volatilidad implícita en la curva teórica.</p>", unsafe_allow_html=True)
-        
-        c_sl1, c_sl2, c_sl3 = st.columns(3)
-        vol_sim = c_sl1.slider("Volatilidad Implícita (σ)", min_value=5, max_value=150, value=25, step=5, format="%d%%", key="opt_vol_sim") / 100.0
-        dias_sim = c_sl2.slider("Días al Vencimiento (T)", min_value=0, max_value=365, value=45, step=1, key="opt_dias_sim")
-        tasa_sim = c_sl3.slider("Tasa Libre de Riesgo (r)", min_value=0.0, max_value=15.0, value=5.0, step=0.5, format="%.1f%%", key="opt_tasa_sim") / 100.0
-        
         # Calcular límites del subyacente para el gráfico
         k_list = [float(p["strike"]) for p in st.session_state["patas_opciones"]]
         min_k, max_k = min(k_list), max(k_list)
@@ -2494,17 +2493,6 @@ with tabs[2]:
         range_max = float(max_k * 1.25)
         
         T_years = max(dias_sim / 365.0, 1e-5)
-        
-        # Sincronizar las primas de entrada de las patas con la volatilidad (vol_sim) y tasa (tasa_sim) seleccionadas
-        for pata in st.session_state["patas_opciones"]:
-            pata["precio_entrada"] = MotorBlackScholes.calcular_prima_bs(
-                S=precio_ref_calc,
-                K=float(pata["strike"]),
-                T=T_calc,
-                r=tasa_sim,
-                sigma=vol_sim,
-                tipo=pata["right"]
-            )
             
         # Calculamos curvas
         payoff_data = MotorBlackScholes.calcular_payoff_estrategia(
