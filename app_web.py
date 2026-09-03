@@ -2379,18 +2379,19 @@ with tabs[2]:
             sigma=sigma_calc,
             tipo=pata["right"]
         )
-        premium_bs = max(0.0, premium_bs)
-        pata["precio_entrada"] = premium_bs
+        pata["prima_teorica"] = float(premium_bs)
+        pata["precio_entrada"] = float(premium_bs)
         
-        # Mostrar la prima como campo de solo lectura (deshabilitado) sincronizado al instante
-        leg_p_key = f"leg_p_txt_{idx}_{pata['strike']}_{pata['right']}_{opt_vencimiento_str}_{sigma_calc}_{r_calc}_{pata['precio_entrada']:.2f}"
-        col_prem.text_input(
-            f"Prima #{idx+1}", 
-            value=f"{pata['precio_entrada']:.2f}", 
-            key=leg_p_key,
-            disabled=True,
-            label_visibility="collapsed"
+        # 1. Diagnóstico exacto con st.error
+        st.error(
+            f"LEG={idx} S={precio_ref_calc!r} K={pata['strike']!r} "
+            f"T={T_calc!r} sigma={sigma_calc!r} r={r_calc!r} "
+            f"premium_bs={premium_bs!r} "
+            f"precio_entrada={pata.get('precio_entrada')!r}"
         )
+        
+        # 2. Renderizado directo sin text_input ni key ni session_state
+        col_prem.markdown(f"**${premium_bs:.4f}**")
         
         # 6. Vencimiento deshabilitado (solo lectura) vinculado al vencimiento global
         pata["vencimiento"] = opt_vencimiento_str
