@@ -3,6 +3,43 @@ import os
 import json
 from datetime import datetime
 import pandas as pd
+import hashlib
+
+class EstrategiaDuplicadaError(Exception):
+    """Excepción lanzada cuando se intenta crear una estrategia con la misma huella canónica determinista."""
+    def __init__(self, mensaje, est_existente_id=None):
+        super().__init__(mensaje)
+        self.est_existente_id = est_existente_id
+
+def calcular_huella_estrategia(ticker, tipo_activo, patas, precio_entrada, condiciones_entrada, condiciones_salida):
+    """
+    Calcula una huella canónica SHA-256 determinista para una estrategia
+    ordenando patas y claves de configuración.
+    """
+    patas_norm = []
+    if isinstance(patas, list):
+        for p in patas:
+            p_norm = {
+                "accion": str(p.get("accion", "")).upper().strip(),
+                "right": str(p.get("right", "")).upper().strip(),
+                "strike": float(p.get("strike", 0.0)),
+                "cantidad": int(p.get("cantidad", 1)),
+                "vencimiento": str(p.get("vencimiento", "")).strip()
+            }
+            patas_norm.append(p_norm)
+        patas_norm.sort(key=lambda x: (x["vencimiento"], x["strike"], x["right"], x["accion"], x["cantidad"]))
+
+    payload = {
+        "ticker": str(ticker).upper().strip(),
+        "tipo_activo": str(tipo_activo).upper().strip(),
+        "patas": patas_norm,
+        "precio_entrada": round(float(precio_entrada), 2) if precio_entrada is not None else None,
+        "condiciones_entrada": condiciones_entrada or {},
+        "condiciones_salida": condiciones_salida or {}
+    }
+
+    canonical_json = json.dumps(payload, sort_keys=True)
+    return hashlib.sha256(canonical_json.encode('utf-8')).hexdigest()
 
 class GestorBaseDatos:
     """
@@ -78,9 +115,18 @@ class GestorBaseDatos:
                 order_id_salida INTEGER,
                 precio_entrada REAL,
                 precio_salida REAL,
-                pnl_realizado REAL
+                pnl_realizado REAL,
+                huella_hash TEXT
             )
         ''')
+
+        # Migración automática si la tabla existía sin huella_hash
+        cursor.execute("PRAGMA table_info(estrategias);")
+        columnas = [row[1] for row in cursor.fetchall()]
+        if "huella_hash" not in columnas:
+            cursor.execute("ALTER TABLE estrategias ADD COLUMN huella_hash TEXT;")
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_estrategias_huella ON estrategias(huella_hash);")
 
         # Tabla de Caché de Sesión: Guarda el estado del bróker para modo offline
         cursor.execute('''
@@ -165,14 +211,30 @@ class GestorBaseDatos:
     # MÉTODOS CRUD PARA ESTRATEGIAS
     # ==========================================
 
-    def crear_estrategia(self, ticker, tipo_activo, estado, patas, condiciones_entrada=None, condiciones_salida=None, precio_entrada=None):
+    def crear_estrategia(self, ticker, tipo_activo, estado, patas, condiciones_entrada=None, condiciones_salida=None, precio_entrada=None, permitir_duplicado=False):
         """
-        Inserta una nueva estrategia en la base de datos.
-        Convierte automáticamente las patas y condiciones (listas/dicts) a strings JSON.
+        Inserta una nueva estrategia en la base de datos protegiendo la idempotencia mediante huella SHA-256.
+        Si la estrategia ya existe en estado activo/pendiente y permitir_duplicado=False, lanza EstrategiaDuplicadaError.
         """
         conexion = self._conectar()
         cursor = conexion.cursor()
         ahora = datetime.now().isoformat()
+        
+        huella = calcular_huella_estrategia(ticker, tipo_activo, patas, precio_entrada, condiciones_entrada, condiciones_salida)
+        
+        if not permitir_duplicado:
+            cursor.execute('''
+                SELECT id FROM estrategias 
+                WHERE huella_hash = ? AND estado IN ('PENDIENTE', 'PENDIENTE_ENTRADA', 'ORDEN_ENVIADA', 'ACTIVA', 'EJECUTADA')
+            ''', (huella,))
+            existente = cursor.fetchone()
+            if existente:
+                est_id_existente = existente[0]
+                conexion.close()
+                raise EstrategiaDuplicadaError(
+                    f"Ya existe una estrategia idéntica pendiente o activa con ID #{est_id_existente}.",
+                    est_existente_id=est_id_existente
+                )
         
         patas_str = json.dumps(patas)
         cond_entrada_str = json.dumps(condiciones_entrada) if condiciones_entrada is not None else None
@@ -182,16 +244,34 @@ class GestorBaseDatos:
             cursor.execute('''
                 INSERT INTO estrategias (
                     ticker, tipo_activo, estado, fecha_creacion,
-                    patas_json, condiciones_entrada_json, condiciones_salida_json, precio_entrada
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (ticker, tipo_activo, estado, ahora, patas_str, cond_entrada_str, cond_salida_str, precio_entrada))
+                    patas_json, condiciones_entrada_json, condiciones_salida_json, precio_entrada, huella_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (ticker, tipo_activo, estado, ahora, patas_str, cond_entrada_str, cond_salida_str, precio_entrada, huella))
             conexion.commit()
             estrategia_id = cursor.lastrowid
-            self.registrar_evento("CREAR_ESTRATEGIA", f"Creada estrategia ID {estrategia_id} para {ticker} ({tipo_activo})")
+            self.registrar_evento("CREAR_ESTRATEGIA", f"Creada estrategia ID {estrategia_id} para {ticker} ({tipo_activo}) [Huella: {huella[:8]}]")
             return estrategia_id
         except Exception as e:
             self.registrar_evento("ERROR_CREAR_ESTRATEGIA", f"Error al insertar estrategia: {e}")
             raise e
+        finally:
+            conexion.close()
+
+    def cancelar_estrategias_prueba(self, ids=[236, 237, 238, 239]):
+        """Marca como CANCELADA_PRUEBA estrategias de pruebas offline para conservar trazabilidad."""
+        conexion = self._conectar()
+        cursor = conexion.cursor()
+        ahora = datetime.now().isoformat()
+        try:
+            for est_id in ids:
+                cursor.execute(
+                    "UPDATE estrategias SET estado = 'CANCELADA_PRUEBA', fecha_cierre = ? WHERE id = ? AND estado != 'CANCELADA_PRUEBA'",
+                    (ahora, est_id)
+                )
+            conexion.commit()
+            self.registrar_evento("CANCELAR_PRUEBAS", f"Estrategias {ids} marcadas como CANCELADA_PRUEBA")
+        except Exception as e:
+            print(f"Error al cancelar estrategias de prueba: {e}")
         finally:
             conexion.close()
 

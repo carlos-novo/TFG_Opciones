@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 
 from conexion_ibkr import GestorIBKR
 from motor_logica import MotorEstrategias, MotorSalida
-from base_datos import GestorBaseDatos
+from base_datos import GestorBaseDatos, EstrategiaDuplicadaError
 from motor_bs import MotorBlackScholes
 from notificaciones import enviar_alerta_webhook
 from watchdogs import iniciar_watchdog_entradas, iniciar_watchdog_salidas, detener_watchdogs
@@ -2907,13 +2907,20 @@ with tabs[2]:
             if opt_hora_sal is None:
                 opt_hora_sal = "21:45"
                 
-        st.markdown("<br>", unsafe_allow_html=True)
+        col_dup, col_conf = st.columns([1, 2])
+        with col_dup:
+            opt_permitir_duplicado = st.checkbox(
+                "Permitir estrategia duplicada",
+                key="chk_permitir_dup_opt",
+                help="ADVERTENCIA: Marcar esta casilla permitirá crear una orden idéntica duplicando la exposición acumulada."
+            )
         
         lbl_obj = f"${opt_precio_entrada:+.2f}" if opt_precio_entrada is not None else "Mercado"
-        confirm_encolar = st.checkbox(
-            f"Confirmar encolado de estrategia ({opt_tipo_lmt}: {lbl_obj} / acción | Valor Teórico: ${credito_teorico_accion:+.2f})",
-            key="chk_confirm_encolar_opt"
-        )
+        with col_conf:
+            confirm_encolar = st.checkbox(
+                f"Confirmar encolado ({opt_tipo_lmt}: {lbl_obj} / acción | Valor Teórico: ${credito_teorico_accion:+.2f})",
+                key="chk_confirm_encolar_opt"
+            )
         submit_opt = st.button("Encolar Estrategia Opciones", width="stretch", key="btn_encolar_opciones")
 
         if submit_opt:
@@ -2979,17 +2986,27 @@ with tabs[2]:
                     patas=patas_serializadas,
                     condiciones_entrada=opt_cond_ent if opt_cond_ent else None,
                     condiciones_salida=opt_cond_sal if opt_cond_sal else None,
-                    precio_entrada=opt_precio_entrada
+                    precio_entrada=opt_precio_entrada,
+                    permitir_duplicado=opt_permitir_duplicado
                 )
+
+                st.session_state["ultima_estrategia_creada_id"] = est_id
+                st.session_state["chk_confirm_encolar_opt"] = False
 
                 st.success(f"🚀 Estrategia de opciones #{est_id} encolada correctamente en estado PENDIENTE_ENTRADA.")
                 db.registrar_evento("CREACION_ESTRATEGIA_UI", f"Estrategia #{est_id} de opciones ({opt_ticker}) encolada.")
 
+                modo_red = "ONLINE (IBKR Conectado)" if (broker_global and broker_global.conectado) else "OFFLINE / NO TRANSMITIDA"
+
                 enviar_alerta_webhook(
-                    titulo="📥 Nueva Estrategia Encolada (Opciones)",
-                    mensaje=f"**ID:** {est_id}\n**Ticker:** {opt_ticker}\n**Tipo:** {tipo_act_est}\n**Patas:** {len(patas_serializadas)} patas\n**Precio Objetivo:** {opt_precio_entrada if opt_precio_entrada else 'Mercado'}\n**Frecuencia:** {opt_frecuencia}",
+                    titulo=f"📥 Nueva Estrategia Encolada (Opciones) [{modo_red}]",
+                    mensaje=f"**ID:** #{est_id}\n**Ticker:** {opt_ticker}\n**Tipo:** {tipo_act_est}\n**Patas:** {len(patas_serializadas)} patas\n**Precio Objetivo:** {opt_precio_entrada if opt_precio_entrada else 'Mercado'}\n**Frecuencia:** {opt_frecuencia}\n**Modo:** {modo_red}",
                     color="info"
                 )
+            except EstrategiaDuplicadaError as dup_err:
+                est_dup_id = dup_err.est_existente_id
+                st.warning(f"⚠️ **Estrategia Duplicada Bloqueada:** Ya existe una estrategia idéntica pendiente o activa con ID #{est_dup_id}.\n\nMarca la casilla **'Permitir estrategia duplicada'** si deseas asumir conscientemente el riesgo acumulado de duplicar la posición.")
+                db.registrar_evento("DUPLICADO_BLOQUEADO", f"Intento de encolar duplicado para {opt_ticker} bloqueado por huella canónica (ID existente #{est_dup_id}).")
             except Exception as e:
                 st.error(f"Error al guardar estrategia: {e}")
 

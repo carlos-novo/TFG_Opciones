@@ -254,7 +254,7 @@ def test_validacion_precio_limite_y_credito_teorico():
     """
     Verifica que:
     1. El crédito teórico de la combinación Iron Condor 22d sea aproximadamente +4.00 USD por acción.
-    2. Recharce precio limite 0.0 USD para ordenes de crédito/débito.
+    2. Rechace precio límite 0.0 USD para órdenes de crédito/débito.
     3. Rechace desajuste de signo entre crédito (+) y prima negativa (-).
     """
     patas = [
@@ -278,3 +278,136 @@ def test_validacion_precio_limite_y_credito_teorico():
     
     precio_lmt_incoherente = -4.00
     assert credito_teorico_accion > 0 and precio_lmt_incoherente < 0 # Conflicto detectado
+
+def test_idempotencia_huella_y_bloqueo_duplicados():
+    """
+    Verifica que:
+    - Tres intentos de inserción idénticos produzcan solo 1 fila en la base de datos.
+    - El segundo y tercer intento devuelvan EstrategiaDuplicadaError con el ID de la fila existente.
+    """
+    from base_datos import EstrategiaDuplicadaError, calcular_huella_estrategia
+    
+    db_path_temp = "test_temp_idempotencia.db"
+    db_mem = GestorBaseDatos(db_name=db_path_temp, reset_db=True)
+    try:
+        patas = [
+            {"accion": "BUY", "right": "P", "strike": 317.5, "cantidad": 1, "vencimiento": "2026-09-25"},
+            {"accion": "SELL", "right": "P", "strike": 322.5, "cantidad": 1, "vencimiento": "2026-09-25"},
+            {"accion": "SELL", "right": "C", "strike": 327.5, "cantidad": 1, "vencimiento": "2026-09-25"},
+            {"accion": "BUY", "right": "C", "strike": 332.5, "cantidad": 1, "vencimiento": "2026-09-25"}
+        ]
+        
+        # 1. Primer intento exitoso
+        est_id_1 = db_mem.crear_estrategia(
+            ticker="AAPL", tipo_activo="BAG", estado="PENDIENTE_ENTRADA",
+            patas=patas, precio_entrada=4.00
+        )
+        assert isinstance(est_id_1, int)
+        
+        # 2. Segundo intento idéntico debe lanzar EstrategiaDuplicadaError
+        with pytest.raises(EstrategiaDuplicadaError) as exc_info_2:
+            db_mem.crear_estrategia(
+                ticker="AAPL", tipo_activo="BAG", estado="PENDIENTE_ENTRADA",
+                patas=patas, precio_entrada=4.00
+            )
+        assert exc_info_2.value.est_existente_id == est_id_1
+        
+        # 3. Tercer intento idéntico debe lanzar EstrategiaDuplicadaError
+        with pytest.raises(EstrategiaDuplicadaError) as exc_info_3:
+            db_mem.crear_estrategia(
+                ticker="AAPL", tipo_activo="BAG", estado="PENDIENTE_ENTRADA",
+                patas=patas, precio_entrada=4.00
+            )
+        assert exc_info_3.value.est_existente_id == est_id_1
+        
+        # Comprobar que en la BD sólo existe 1 fila
+        estrategias = db_mem.obtener_estrategias(estado="PENDIENTE_ENTRADA")
+        assert len(estrategias) == 1
+    finally:
+        db_mem.borrar_base_datos()
+
+def test_diferencia_huella_por_parametro():
+    """
+    Verifica que cambiar strike, vencimiento o precio limite genere una huella SHA-256 distinta
+    y permita crear la estrategia.
+    """
+    from base_datos import calcular_huella_estrategia
+    
+    patas_orig = [{"accion": "BUY", "right": "C", "strike": 100.0, "cantidad": 1, "vencimiento": "2026-09-25"}]
+    patas_mod_strike = [{"accion": "BUY", "right": "C", "strike": 105.0, "cantidad": 1, "vencimiento": "2026-09-25"}]
+    
+    h1 = calcular_huella_estrategia("AAPL", "OPTION", patas_orig, 2.50, {}, {})
+    h2 = calcular_huella_estrategia("AAPL", "OPTION", patas_mod_strike, 2.50, {}, {})
+    h3 = calcular_huella_estrategia("AAPL", "OPTION", patas_orig, 3.00, {}, {})
+    
+    assert h1 != h2
+    assert h1 != h3
+
+def test_override_permitir_duplicado():
+    """
+    Verifica que al especificar permitir_duplicado=True se cree una segunda estrategia
+    con la misma huella canónica.
+    """
+    db_path_temp = "test_temp_override.db"
+    db_mem = GestorBaseDatos(db_name=db_path_temp, reset_db=True)
+    try:
+        patas = [{"accion": "BUY", "right": "C", "strike": 100.0, "cantidad": 1, "vencimiento": "2026-09-25"}]
+        
+        id1 = db_mem.crear_estrategia("AAPL", "OPTION", "PENDIENTE_ENTRADA", patas, precio_entrada=2.50)
+        id2 = db_mem.crear_estrategia("AAPL", "OPTION", "PENDIENTE_ENTRADA", patas, precio_entrada=2.50, permitir_duplicado=True)
+        
+        assert id1 != id2
+        assert len(db_mem.obtener_estrategias(estado="PENDIENTE_ENTRADA")) == 2
+    finally:
+        db_mem.borrar_base_datos()
+
+def test_estados_cancelados_no_procesados():
+    """
+    Verifica que marcar una estrategia como CANCELADA_PRUEBA permita crear un nuevo ciclo
+    y que dicha estrategia sea ignorada en los filtros de estrategias activas/pendientes.
+    """
+    db_path_temp = "test_temp_canceladas.db"
+    db_mem = GestorBaseDatos(db_name=db_path_temp, reset_db=True)
+    try:
+        patas = [{"accion": "BUY", "right": "C", "strike": 100.0, "cantidad": 1, "vencimiento": "2026-09-25"}]
+        
+        id1 = db_mem.crear_estrategia("AAPL", "OPTION", "PENDIENTE_ENTRADA", patas, precio_entrada=2.50)
+        db_mem.cancelar_estrategias_prueba([id1])
+        
+        # Una vez cancelada, el intento de crear una idéntica debe ser permitido
+        id2 = db_mem.crear_estrategia("AAPL", "OPTION", "PENDIENTE_ENTRADA", patas, precio_entrada=2.50)
+        assert id1 != id2
+        
+        pendientes = db_mem.obtener_estrategias(estado="PENDIENTE_ENTRADA")
+        assert len(pendientes) == 1
+        assert pendientes[0]["id"] == id2
+    finally:
+        db_mem.borrar_base_datos()
+
+def test_notificacion_offline_contiene_no_transmitida(monkeypatch):
+    """
+    Verifica que en notificaciones offline el mensaje contenga 'OFFLINE / NO TRANSMITIDA'.
+    """
+    from notificaciones import enviar_alerta_webhook
+    
+    ultimo_payload = {}
+    def mock_post(url, json, timeout):
+        nonlocal ultimo_payload
+        ultimo_payload = json
+        class MockResp:
+            status_code = 200
+        return MockResp()
+        
+    monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/mock")
+    monkeypatch.setattr("requests.post", mock_post)
+    
+    modo_red = "OFFLINE / NO TRANSMITIDA"
+    enviar_alerta_webhook(
+        titulo=f"📥 Nueva Estrategia Encolada (Opciones) [{modo_red}]",
+        mensaje=f"Modo: {modo_red}",
+        color="info"
+    )
+    
+    assert "OFFLINE / NO TRANSMITIDA" in ultimo_payload["embeds"][0]["title"]
+    assert "OFFLINE / NO TRANSMITIDA" in ultimo_payload["embeds"][0]["description"]
+
