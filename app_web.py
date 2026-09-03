@@ -2363,16 +2363,11 @@ with tabs[2]:
         premium_bs = max(0.0, premium_bs)
         pata["precio_entrada"] = premium_bs
         
-        # Sincronizar explícitamente st.session_state para evitar caché obsoleto en campos deshabilitados
-        leg_p_key = f"leg_p_{idx}_{pata['strike']}_{pata['right']}_{opt_vencimiento_str}_{sigma_calc}_{r_calc}"
-        st.session_state[leg_p_key] = float(pata["precio_entrada"])
-        
-        # Mostrar la prima como campo de solo lectura (deshabilitado)
-        col_prem.number_input(
+        # Mostrar la prima como campo de solo lectura (deshabilitado) sincronizado al instante
+        leg_p_key = f"leg_p_txt_{idx}_{pata['strike']}_{pata['right']}_{opt_vencimiento_str}_{sigma_calc}_{r_calc}_{pata['precio_entrada']:.2f}"
+        col_prem.text_input(
             f"Prima #{idx+1}", 
-            min_value=0.0, 
-            value=float(pata["precio_entrada"]), 
-            step=0.05, 
+            value=f"{pata['precio_entrada']:.2f}", 
             key=leg_p_key,
             disabled=True,
             label_visibility="collapsed"
