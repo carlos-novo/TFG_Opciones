@@ -111,7 +111,7 @@ class MotorBlackScholes:
             tipo = pata.get("tipo_activo", "OPTION").upper()
             accion = pata.get("accion", "BUY").upper()
             cantidad = int(pata.get("cantidad", 1))
-            precio_ent = float(pata.get("precio_entrada", 0.0))
+            precio_ent = float(pata.get("prima_teorica") if pata.get("prima_teorica") is not None else pata.get("precio_entrada", 0.0))
             
             dir_mult = 1 if accion == "BUY" else -1
             

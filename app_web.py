@@ -2268,21 +2268,32 @@ with tabs[2]:
         
     strikes_disponibles = sorted([float(s) for s in cadenas.get(opt_vencimiento_str, [100.0])])
     
-    try:
-        from zoneinfo import ZoneInfo
-        fecha_val_global = dt.datetime.now(ZoneInfo("America/New_York")).date()
-    except Exception:
-        fecha_val_global = dt.date.today()
+    spot_ref = st.session_state.get("precio_subyacente_opt")
+    if spot_ref is None or spot_ref <= 0:
+        strikes_patas = [float(p.get("strike", 0)) for p in st.session_state["patas_opciones"] if float(p.get("strike", 0)) > 0]
+        if strikes_patas:
+            spot_ref = float(sum(strikes_patas) / len(strikes_patas))
+        else:
+            spot_ref = 100.0
 
     try:
-        venc_date_global = normalizar_vencimiento(opt_vencimiento_str)
-        dias_default = max((venc_date_global - fecha_val_global).days, 0)
+        from zoneinfo import ZoneInfo
+        fecha_valoracion = dt.datetime.now(ZoneInfo("America/New_York")).date()
     except Exception:
-        dias_default = 45
+        fecha_valoracion = dt.date.today()
+
+    try:
+        venc_date = normalizar_vencimiento(opt_vencimiento_str)
+    except ValueError as exc:
+        st.error(str(exc))
+        st.stop()
+        
+    days_to_exp = max((venc_date - fecha_valoracion).days, 0)
+    T_calc = days_to_exp / 365.0
 
     c_sl1, c_sl2, c_sl3 = st.columns(3)
     vol_sim = c_sl1.slider("Volatilidad Implícita (σ)", min_value=5, max_value=150, value=25, step=5, format="%d%%", key="opt_vol_sim", on_change=invalidar_valoracion) / 100.0
-    dias_sim = c_sl2.slider("Días al Vencimiento (T)", min_value=0, max_value=365, value=dias_default, step=1, key="opt_dias_sim", on_change=invalidar_valoracion)
+    dias_sim = c_sl2.slider("Días al Vencimiento (T)", min_value=0, max_value=365, value=days_to_exp, step=1, key="opt_dias_sim", on_change=invalidar_valoracion)
     tasa_sim = c_sl3.slider("Tasa Libre de Riesgo (r)", min_value=0.0, max_value=15.0, value=5.0, step=0.5, format="%.1f%%", key="opt_tasa_sim", on_change=invalidar_valoracion) / 100.0
     
     st.divider()
@@ -2359,50 +2370,11 @@ with tabs[2]:
             label_visibility="collapsed"
         )
         
-        # 5. Calcular Prima Teórica (Black-Scholes) y fijar automáticamente
-        if "opt_vol_sim" not in st.session_state:
-            st.session_state["opt_vol_sim"] = 25
-        if "opt_tasa_sim" not in st.session_state:
-            st.session_state["opt_tasa_sim"] = 5.0
-            
-        precio_ref_calc = st.session_state.get("precio_subyacente_opt")
-        if precio_ref_calc is None or precio_ref_calc <= 0:
-            # Inferir precio spot aproximado del promedio de los strikes si no hay cotización activa
-            strikes_patas = [float(p.get("strike", 0)) for p in st.session_state["patas_opciones"] if float(p.get("strike", 0)) > 0]
-            if strikes_patas:
-                precio_ref_calc = float(sum(strikes_patas) / len(strikes_patas))
-            else:
-                precio_ref_calc = 100.0
-            
-        try:
-            from zoneinfo import ZoneInfo
-            fecha_valoracion = dt.datetime.now(ZoneInfo("America/New_York")).date()
-        except Exception:
-            fecha_valoracion = dt.date.today()
-
-        try:
-            venc_date = normalizar_vencimiento(opt_vencimiento_str)
-        except ValueError as exc:
-            st.error(str(exc))
-            st.stop()
-            
-        days_to_exp = max((venc_date - fecha_valoracion).days, 0)
-        T_calc = days_to_exp / 365.0
-
-        if idx == 0:
-            st.error(
-                f"raw={opt_vencimiento_str!r}, "
-                f"tipo={type(opt_vencimiento_str)!r}, "
-                f"venc_date={venc_date!r}, "
-                f"fecha_valoracion={fecha_valoracion!r}, "
-                f"days={days_to_exp}, T={T_calc}"
-            )
-        
-        # Calcular la prima usando Black-Scholes (sincronizado con la volatilidad y tasa de los sliders)
+        # 5. Calcular Prima Teórica (Black-Scholes) con el spot único consolidado
         sigma_calc = float(st.session_state.get("opt_vol_sim", 25)) / 100.0
         r_calc = float(st.session_state.get("opt_tasa_sim", 5.0)) / 100.0
         premium_bs = MotorBlackScholes.calcular_prima_bs(
-            S=precio_ref_calc,
+            S=spot_ref,
             K=float(pata["strike"]),
             T=T_calc,
             r=r_calc,
@@ -2410,18 +2382,10 @@ with tabs[2]:
             tipo=pata["right"]
         )
         pata["prima_teorica"] = float(premium_bs)
-        pata["precio_entrada"] = float(premium_bs)
         
-        # 1. Diagnóstico exacto con st.error
-        st.error(
-            f"LEG={idx} S={precio_ref_calc!r} K={pata['strike']!r} "
-            f"T={T_calc!r} sigma={sigma_calc!r} r={r_calc!r} "
-            f"premium_bs={premium_bs!r} "
-            f"precio_entrada={pata.get('precio_entrada')!r}"
-        )
-        
-        # 2. Renderizado directo sin text_input ni key ni session_state
-        col_prem.markdown(f"**${premium_bs:.4f}**")
+        # Renderizado de la prima teórica con 4 o 2 decimales según valor
+        texto_prima = f"${premium_bs:.4f}" if premium_bs < 1.0 else f"${premium_bs:.2f}"
+        col_prem.markdown(f"**{texto_prima}**")
         
         # 6. Vencimiento deshabilitado (solo lectura) vinculado al vencimiento global
         pata["vencimiento"] = opt_vencimiento_str
@@ -2684,24 +2648,19 @@ with tabs[2]:
             )
             
         # Línea vertical para el valor actual del subyacente (blanca punteada)
-        precio_ref = st.session_state.get("precio_subyacente_opt")
-        if precio_ref is None:
-            precio_ref = precio_medio_k
-            
         fig.add_vline(
-            x=precio_ref,
+            x=spot_ref,
             line_color="#ffffff",
             line_width=1.5,
             line_dash="dot",
-            annotation_text=f"Actual: {precio_ref:.2f}" if st.session_state.get("precio_subyacente_opt") else f"Medio: {precio_ref:.2f}",
+            annotation_text=f"Actual: ${spot_ref:.2f}",
             annotation_position="bottom",
             annotation_font=dict(color="#ffffff", size=10, family="Outfit")
         )
         
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
         
-        # Cálculo de Greeks agregados teóricos (en el strike medio)
-        precio_medio_k = (min_k + max_k) / 2.0
+        # Cálculo de Greeks agregados teóricos (evaluados en el spot único consolidado)
         delta_net = 0.0
         theta_net = 0.0
         vega_net = 0.0
@@ -2710,7 +2669,7 @@ with tabs[2]:
             sign = 1 if p["accion"] == "BUY" else -1
             qty = int(p["cantidad"])
             g = MotorBlackScholes.calcular_greeks(
-                S=precio_medio_k,
+                S=spot_ref,
                 K=float(p["strike"]),
                 T=T_years,
                 r=tasa_sim,
@@ -2722,7 +2681,7 @@ with tabs[2]:
             theta_net += sign * g["theta"] * qty * 100
             vega_net += sign * g["vega"] * qty * 100
             
-        st.markdown(f"##### Greeks Teóricos Estimados (Evaluados a ${precio_medio_k:.2f})")
+        st.markdown(f"##### Greeks Teóricos Estimados (Evaluados a ${spot_ref:.2f})")
         col_g1, col_g2, col_g3 = st.columns(3)
         col_g1.metric("Delta Neto de Cartera (Δ)", f"{delta_net:.2f}", help="Sensibilidad respecto al precio del subyacente")
         col_g2.metric("Theta Neto Diario (Θ)", f"${theta_net:.2f}", help="Decaimiento temporal diario de la posición")

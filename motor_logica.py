@@ -342,7 +342,7 @@ class MotorSalida:
             right = pata.get("right", "C").upper()
             cantidad = int(pata.get("cantidad", 1))
             accion = pata.get("accion", "BUY").upper()
-            precio_entrada_pata = float(pata.get("precio_entrada", 0.0))
+            precio_entrada_pata = float(pata.get("prima_teorica") if pata.get("prima_teorica") is not None else pata.get("precio_entrada", 0.0))
             
             # Payoff unitario en la fecha de liquidación
             payoff_unitario = 0.0
