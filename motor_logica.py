@@ -8,6 +8,19 @@ class MotorEstrategias:
     """
 
     @staticmethod
+    def obtener_prima_pata(pata, modo="TEORICO"):
+        """
+        Obtiene la prima de referencia de una pata en función del modo de operación:
+        - modo="EJECUTADO": Prioriza precio_entrada (precio real confirmado por bróker).
+        - modo="TEORICO": Prioriza prima_teorica (estimación Black-Scholes).
+        """
+        if modo == "EJECUTADO" and pata.get("precio_entrada") is not None:
+            return float(pata["precio_entrada"])
+        elif pata.get("prima_teorica") is not None:
+            return float(pata["prima_teorica"])
+        return float(pata.get("precio_entrada", 0.0))
+
+    @staticmethod
     def calcular_credito_real_iron_condor(gestor, ticker, vencimiento, p_long, p_short, c_short, c_long):
         # Llamamos a la función bulk de mercado
         strikes = [p_long, p_short, c_short, c_long]
@@ -342,7 +355,8 @@ class MotorSalida:
             right = pata.get("right", "C").upper()
             cantidad = int(pata.get("cantidad", 1))
             accion = pata.get("accion", "BUY").upper()
-            precio_entrada_pata = float(pata.get("prima_teorica") if pata.get("prima_teorica") is not None else pata.get("precio_entrada", 0.0))
+            
+            precio_entrada_pata = MotorEstrategias.obtener_prima_pata(pata, modo=pata.get("modo", "TEORICO"))
             
             # Payoff unitario en la fecha de liquidación
             payoff_unitario = 0.0

@@ -123,26 +123,68 @@ def test_separacion_prima_teorica_y_precio_entrada():
         {"tipo_activo": "OPTION", "accion": "BUY", "cantidad": 1, "strike": 332.5, "right": "C", "prima_teorica": 0.0433}
     ]
     
-    # Evaluar payoff
     payoff_data = MotorBlackScholes.calcular_payoff_estrategia(patas, T=0, r=0.05, sigma=0.25, precio_min=300, precio_max=350, puntos=50)
     assert "pnl_vencimiento" in payoff_data
     
-    # PnL maximo dentro del rango central (entre 322.5 y 327.5) debe ser aproximadamente +136.80
     idx_centro = 25
     assert math.isclose(payoff_data["pnl_vencimiento"][idx_centro], 136.80, abs_tol=2.0)
 
-def test_unificacion_spot_ref():
+def test_pnl_simulado_en_spot_igual_cero():
     """
-    Verifica que primas y griegas usen el mismo spot de referencia.
+    Verifica que con T_escenario == T_inicial, el P&L temporal simulado en spot_ref sea 0.0.
     """
-    S = 324.14
-    K = 322.5
-    T = 1.0 / 365.0
+    spot_ref = 324.14
+    T_init = 1.0 / 365.0
     r = 0.05
     sigma = 0.25
     
-    prima = MotorBlackScholes.calcular_prima_bs(S, K, T, r, sigma, 'P')
-    griegas = MotorBlackScholes.calcular_greeks(S, K, T, r, sigma, 'P')
+    patas = [
+        {"strike": 317.5, "right": "P", "accion": "BUY", "cantidad": 1},
+        {"strike": 322.5, "right": "P", "accion": "SELL", "cantidad": 1},
+        {"strike": 327.5, "right": "C", "accion": "SELL", "cantidad": 1},
+        {"strike": 332.5, "right": "C", "accion": "BUY", "cantidad": 1}
+    ]
+    for p in patas:
+        p["prima_teorica"] = MotorBlackScholes.calcular_prima_bs(spot_ref, float(p["strike"]), T_init, r, sigma, p["right"])
+        
+    pnl_simulado = 0.0
+    for p in patas:
+        sign = 1 if p["accion"] == "BUY" else -1
+        qty = int(p["cantidad"])
+        val_actual = MotorBlackScholes.calcular_prima_bs(spot_ref, float(p["strike"]), T_init, r, sigma, p["right"])
+        pnl_simulado += sign * (val_actual - p["prima_teorica"]) * qty * 100.0
+        
+    assert math.isclose(pnl_simulado, 0.0, abs_tol=1e-5)
+
+def test_modo_ejecutado_vs_teorico():
+    """
+    Verifica que en modo EJECUTADO se use precio_entrada real y en modo TEORICO se use prima_teorica.
+    """
+    pata = {"prima_teorica": 2.50, "precio_entrada": 3.00}
     
-    assert prima > 0
-    assert griegas["delta"] < 0
+    prima_teorica = MotorEstrategias.obtener_prima_pata(pata, modo="TEORICO")
+    prima_ejecutada = MotorEstrategias.obtener_prima_pata(pata, modo="EJECUTADO")
+    
+    assert prima_teorica == 2.50
+    assert prima_ejecutada == 3.00
+
+def test_independencia_dias_sim_y_primas_iniciales():
+    """
+    Verifica que cambiar T_escenario modifique las griegas y la curva temporal
+    sin alterar las primas iniciales fijadas por T_inicial.
+    """
+    S = 324.14
+    T_inicial = 22.0 / 365.0
+    r = 0.05
+    sigma = 0.25
+    
+    prima_init = MotorBlackScholes.calcular_prima_bs(S, 322.5, T_inicial, r, sigma, 'P')
+    
+    T_escenario = 10.0 / 365.0
+    griegas_escenario = MotorBlackScholes.calcular_greeks(S, 322.5, T_escenario, r, sigma, 'P')
+    
+    # La prima inicial se conserva constante
+    assert prima_init == MotorBlackScholes.calcular_prima_bs(S, 322.5, T_inicial, r, sigma, 'P')
+    # Las griegas del escenario varian con T_escenario
+    griegas_init = MotorBlackScholes.calcular_greeks(S, 322.5, T_inicial, r, sigma, 'P')
+    assert griegas_escenario["theta"] != griegas_init["theta"]

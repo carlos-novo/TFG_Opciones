@@ -2251,6 +2251,22 @@ with tabs[2]:
         for key in ("payoff_data", "figura_payoff", "credito_neto", "opt_payoff_fig"):
             st.session_state.pop(key, None)
 
+    def sincronizar_escenario_temporal():
+        vencimiento_val = st.session_state.get("opt_global_vencimiento")
+        if vencimiento_val:
+            try:
+                venc_date_val = normalizar_vencimiento(vencimiento_val)
+                try:
+                    from zoneinfo import ZoneInfo
+                    fecha_val = dt.datetime.now(ZoneInfo("America/New_York")).date()
+                except Exception:
+                    fecha_val = dt.date.today()
+                days_calc = max((venc_date_val - fecha_val).days, 0)
+                st.session_state["opt_dias_sim"] = days_calc
+            except Exception:
+                pass
+        invalidar_valoracion()
+
     expirations = sorted(list(cadenas.keys()))
     if expirations:
         val_default = expirations[0]
@@ -2261,7 +2277,7 @@ with tabs[2]:
             options=expirations, 
             index=expirations.index(val_default),
             key="opt_global_vencimiento",
-            on_change=invalidar_valoracion
+            on_change=sincronizar_escenario_temporal
         )
     else:
         opt_vencimiento_str = dt.date.today().strftime("%Y-%m-%d")
@@ -2289,12 +2305,19 @@ with tabs[2]:
         st.stop()
         
     days_to_exp = max((venc_date - fecha_valoracion).days, 0)
-    T_calc = days_to_exp / 365.0
+    T_inicial = days_to_exp / 365.0
+
+    st.caption("ℹ️ Las primas representan la valoración teórica inicial para el vencimiento contractual seleccionado. Este control permite simular el paso del tiempo y modifica la curva temporal y las griegas, pero no las primas iniciales de referencia.")
 
     c_sl1, c_sl2, c_sl3 = st.columns(3)
     vol_sim = c_sl1.slider("Volatilidad Implícita (σ)", min_value=5, max_value=150, value=25, step=5, format="%d%%", key="opt_vol_sim", on_change=invalidar_valoracion) / 100.0
-    dias_sim = c_sl2.slider("Días al Vencimiento (T)", min_value=0, max_value=365, value=days_to_exp, step=1, key="opt_dias_sim", on_change=invalidar_valoracion)
+    
+    max_dias_sim = max(days_to_exp, 1)
+    val_dias_sim = min(int(st.session_state.get("opt_dias_sim", days_to_exp)), max_dias_sim)
+    dias_sim = c_sl2.slider("Días Restantes del Escenario Simulado", min_value=0, max_value=max_dias_sim, value=val_dias_sim, step=1, key="opt_dias_sim", on_change=invalidar_valoracion)
     tasa_sim = c_sl3.slider("Tasa Libre de Riesgo (r)", min_value=0.0, max_value=15.0, value=5.0, step=0.5, format="%.1f%%", key="opt_tasa_sim", on_change=invalidar_valoracion) / 100.0
+
+    T_escenario = max(dias_sim / 365.0, 0.0)
     
     st.divider()
     st.subheader("Configuración de las Patas (Legs)")
@@ -2506,7 +2529,7 @@ with tabs[2]:
         # Calculamos curvas
         payoff_data = MotorBlackScholes.calcular_payoff_estrategia(
             patas=st.session_state["patas_opciones"],
-            T=T_years,
+            T=T_escenario,
             r=tasa_sim,
             sigma=vol_sim,
             precio_min=range_min,
@@ -2573,7 +2596,7 @@ with tabs[2]:
             x=S_sorted,
             y=y_pos,
             mode='lines',
-            name='A Vencimiento (T=0)',
+            name='Payoff a Vencimiento (T=0)',
             line=dict(color='#10b981', width=3.5),
             fill='tozeroy',
             fillcolor='rgba(16, 185, 129, 0.2)',
@@ -2585,7 +2608,7 @@ with tabs[2]:
             x=S_sorted,
             y=y_neg,
             mode='lines',
-            name='A Vencimiento (T=0)',
+            name='Payoff a Vencimiento (T=0)',
             line=dict(color='#f43f5e', width=3.5),
             fill='tozeroy',
             fillcolor='rgba(244, 63, 94, 0.2)',
@@ -2598,8 +2621,39 @@ with tabs[2]:
             x=payoff_data["S"],
             y=payoff_data["pnl_temporal"],
             mode='lines',
-            name=f'Valor Temporal (T={dias_sim} días)',
+            name=f'Valor Temporal Simulado (T={dias_sim} días)',
             line=dict(color='#6366f1', width=3)
+        ))
+        
+        # Marcador del P&L exacto en el spot actual
+        pnl_spot_simulado = 0.0
+        for p in st.session_state["patas_opciones"]:
+            sign = 1 if p["accion"] == "BUY" else -1
+            qty = int(p["cantidad"])
+            strike = float(p["strike"])
+            right = p["right"]
+            prima_ref = float(p.get("prima_teorica") if p.get("prima_teorica") is not None else p.get("precio_entrada", 0.0))
+            
+            if T_escenario <= 0:
+                val_actual = max(spot_ref - strike, 0.0) if right in ["C", "CALL"] else max(strike - spot_ref, 0.0)
+            else:
+                val_actual = MotorBlackScholes.calcular_prima_bs(
+                    S=spot_ref, K=strike, T=T_escenario, r=tasa_sim, sigma=vol_sim, tipo=right
+                )
+            pnl_spot_simulado += sign * (val_actual - prima_ref) * qty * 100.0
+
+        if abs(pnl_spot_simulado) < 1e-4:
+            pnl_spot_simulado = 0.0
+
+        fig.add_trace(go.Scatter(
+            x=[spot_ref],
+            y=[pnl_spot_simulado],
+            mode='markers+text',
+            name=f'P&L Simulado en Spot (${pnl_spot_simulado:+.2f})',
+            marker=dict(color='#38bdf8', size=10, symbol='diamond'),
+            text=[f" ${pnl_spot_simulado:+.2f}"],
+            textposition="top right",
+            textfont=dict(color="#38bdf8", size=11, family="Outfit")
         ))
         
         # Layout premium
@@ -2660,7 +2714,7 @@ with tabs[2]:
         
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
         
-        # Cálculo de Greeks agregados teóricos (evaluados en el spot único consolidado)
+        # Cálculo de Greeks agregados teóricos (evaluados en el spot único y T_escenario)
         delta_net = 0.0
         theta_net = 0.0
         vega_net = 0.0
@@ -2671,7 +2725,7 @@ with tabs[2]:
             g = MotorBlackScholes.calcular_greeks(
                 S=spot_ref,
                 K=float(p["strike"]),
-                T=T_years,
+                T=T_escenario,
                 r=tasa_sim,
                 sigma=vol_sim,
                 tipo=p["right"]
