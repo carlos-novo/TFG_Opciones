@@ -1,6 +1,6 @@
 import streamlit as st
 import hashlib
-from datetime import date, datetime
+import datetime as dt
 import threading
 import time
 import random
@@ -2112,10 +2112,10 @@ with tabs[2]:
     if "patas_opciones" not in st.session_state:
         # Pre-cargar un Iron Condor de muestra para impresionar
         st.session_state["patas_opciones"] = [
-            {"tipo_activo": "OPTION", "accion": "BUY", "cantidad": 1, "strike": 90.0, "right": "P", "vencimiento": date.today().strftime("%Y-%m-%d"), "precio_entrada": 1.50},
-            {"tipo_activo": "OPTION", "accion": "SELL", "cantidad": 1, "strike": 95.0, "right": "P", "vencimiento": date.today().strftime("%Y-%m-%d"), "precio_entrada": 3.20},
-            {"tipo_activo": "OPTION", "accion": "SELL", "cantidad": 1, "strike": 105.0, "right": "C", "vencimiento": date.today().strftime("%Y-%m-%d"), "precio_entrada": 2.80},
-            {"tipo_activo": "OPTION", "accion": "BUY", "cantidad": 1, "strike": 110.0, "right": "C", "vencimiento": date.today().strftime("%Y-%m-%d"), "precio_entrada": 1.10}
+            {"tipo_activo": "OPTION", "accion": "BUY", "cantidad": 1, "strike": 90.0, "right": "P", "vencimiento": dt.date.today().strftime("%Y-%m-%d"), "precio_entrada": 1.50},
+            {"tipo_activo": "OPTION", "accion": "SELL", "cantidad": 1, "strike": 95.0, "right": "P", "vencimiento": dt.date.today().strftime("%Y-%m-%d"), "precio_entrada": 3.20},
+            {"tipo_activo": "OPTION", "accion": "SELL", "cantidad": 1, "strike": 105.0, "right": "C", "vencimiento": dt.date.today().strftime("%Y-%m-%d"), "precio_entrada": 2.80},
+            {"tipo_activo": "OPTION", "accion": "BUY", "cantidad": 1, "strike": 110.0, "right": "C", "vencimiento": dt.date.today().strftime("%Y-%m-%d"), "precio_entrada": 1.10}
         ]
         
     opt_ticker = st.text_input("Ticker Subyacente Opciones", value="SPY").upper()
@@ -2167,18 +2167,16 @@ with tabs[2]:
     # Generar fallback/simulado si no hay conexión o no se obtuvo cadena
     if not cadenas:
         # Generar próximos 11 vencimientos (semanales y mensuales a 5 meses vista)
-        import datetime
-        from datetime import date, timedelta
         exp_dates = []
-        d = date.today()
+        d = dt.date.today()
         while len(exp_dates) < 8:
-            d += timedelta(days=1)
+            d += dt.timedelta(days=1)
             if d.weekday() == 4: # Viernes
                 exp_dates.append(d.strftime("%Y-%m-%d"))
         for m_offset in range(1, 5):
-            future_month = (date.today().month + m_offset - 1) % 12 + 1
-            future_year = date.today().year + (date.today().month + m_offset - 1) // 12
-            f_date = date(future_year, future_month, 1)
+            future_month = (dt.date.today().month + m_offset - 1) % 12 + 1
+            future_year = dt.date.today().year + (dt.date.today().month + m_offset - 1) // 12
+            f_date = dt.date(future_year, future_month, 1)
             friday_count = 0
             while friday_count < 3:
                 if f_date.weekday() == 4:
@@ -2188,7 +2186,7 @@ with tabs[2]:
                         if ds not in exp_dates:
                             exp_dates.append(ds)
                         break
-                f_date += timedelta(days=1)
+                f_date += dt.timedelta(days=1)
         exp_dates.sort()
         fridays = exp_dates
         
@@ -2231,15 +2229,15 @@ with tabs[2]:
         cadenas = {exp: strikes_simulados for exp in fridays}
 
     def normalizar_vencimiento(valor):
-        if isinstance(valor, datetime):
+        if isinstance(valor, dt.datetime):
             return valor.date()
-        if isinstance(valor, date):
+        if isinstance(valor, dt.date):
             return valor
 
         texto = str(valor).strip().split(" ")[0]
         for formato in ("%Y-%m-%d", "%Y%m%d"):
             try:
-                return datetime.strptime(texto, formato).date()
+                return dt.datetime.strptime(texto, formato).date()
             except ValueError:
                 continue
 
@@ -2266,15 +2264,15 @@ with tabs[2]:
             on_change=invalidar_valoracion
         )
     else:
-        opt_vencimiento_str = date.today().strftime("%Y-%m-%d")
+        opt_vencimiento_str = dt.date.today().strftime("%Y-%m-%d")
         
     strikes_disponibles = sorted([float(s) for s in cadenas.get(opt_vencimiento_str, [100.0])])
     
     try:
         from zoneinfo import ZoneInfo
-        fecha_val_global = datetime.now(ZoneInfo("America/New_York")).date()
+        fecha_val_global = dt.datetime.now(ZoneInfo("America/New_York")).date()
     except Exception:
-        fecha_val_global = date.today()
+        fecha_val_global = dt.date.today()
 
     try:
         venc_date_global = normalizar_vencimiento(opt_vencimiento_str)
@@ -2378,16 +2376,9 @@ with tabs[2]:
             
         try:
             from zoneinfo import ZoneInfo
-            fecha_valoracion = datetime.now(ZoneInfo("America/New_York")).date()
+            fecha_valoracion = dt.datetime.now(ZoneInfo("America/New_York")).date()
         except Exception:
-            fecha_valoracion = date.today()
-
-        if idx == 0:
-            st.error(
-                f"expiry raw={opt_vencimiento_str!r}, "
-                f"type={type(opt_vencimiento_str)}, "
-                f"fecha_valoracion={fecha_valoracion!r}"
-            )
+            fecha_valoracion = dt.date.today()
 
         try:
             venc_date = normalizar_vencimiento(opt_vencimiento_str)
@@ -2397,6 +2388,15 @@ with tabs[2]:
             
         days_to_exp = max((venc_date - fecha_valoracion).days, 0)
         T_calc = days_to_exp / 365.0
+
+        if idx == 0:
+            st.error(
+                f"raw={opt_vencimiento_str!r}, "
+                f"tipo={type(opt_vencimiento_str)!r}, "
+                f"venc_date={venc_date!r}, "
+                f"fecha_valoracion={fecha_valoracion!r}, "
+                f"days={days_to_exp}, T={T_calc}"
+            )
         
         # Calcular la prima usando Black-Scholes (sincronizado con la volatilidad y tasa de los sliders)
         sigma_calc = float(st.session_state.get("opt_vol_sim", 25)) / 100.0
