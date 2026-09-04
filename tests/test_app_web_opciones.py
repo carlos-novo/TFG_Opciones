@@ -570,3 +570,95 @@ def test_renderizado_completo_pestana_opciones_ast():
     assert "chk_confirm_encolar_opt" in tabs2_code
     assert "btn_encolar_opciones" in tabs2_code
     assert "st.stop()" not in tabs2_code, "tabs[2] no debe contener st.stop() en el flujo operativo"
+
+    # Verificación estricta mediante el árbol de sintaxis abstracta (AST)
+    import ast
+    tree = ast.parse(code)
+    tabs2_with_node = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.With):
+            if "tabs[2]" in ast.unparse(node.items[0]):
+                tabs2_with_node = node
+                break
+
+    assert tabs2_with_node is not None, "No se encontró el nodo 'with tabs[2]:' en el AST"
+
+    # Buscar el nodo If que contiene la rama elif
+    elif_node = None
+    for stmt in tabs2_with_node.body:
+        if isinstance(stmt, ast.If):
+            if stmt.orelse:
+                elif_node = stmt.orelse
+                break
+
+    assert elif_node is not None, "No se encontró el bloque elif en tabs[2]"
+    elif_code = "\n".join(ast.unparse(n) for n in elif_node)
+    
+    assert "Parámetros Algorítmicos y Envío" not in elif_code, "'Parámetros Algorítmicos y Envío' no debe pertenecer al cuerpo del elif"
+    assert "btn_encolar_opciones" not in elif_code, "'btn_encolar_opciones' no debe pertenecer al cuerpo del elif"
+
+def test_vencimiento_invalido_no_introduce_t_cero():
+    """
+    Garantiza que una fecha de vencimiento inválida:
+    - Lanza ValueError en normalizar_vencimiento.
+    - No utiliza dt.date.today() como fallback en el manejo de excepciones de app_web.py.
+    - Asigna T_inicial = None en lugar de T_inicial = 0.0.
+    - Hace fallar la validación en procesar_encolado_opciones sin silenciar el error.
+    """
+    with pytest.raises(ValueError):
+        normalizar_vencimiento("2026-99-99")
+
+    with open("app_web.py", "r", encoding="utf-8") as f:
+        code = f.read()
+
+    tabs2_pos = code.find("with tabs[2]:")
+    tabs3_pos = code.find("with tabs[3]:")
+    tabs2_code = code[tabs2_pos:tabs3_pos]
+
+    # Verificar que no exista fallback a dt.date.today() en el bloque except
+    assert "venc_date = dt.date.today()" not in tabs2_code, "app_web.py no debe usar dt.date.today() como fallback ante vencimiento inválido"
+    assert "T_inicial = None" in tabs2_code, "T_inicial debe ser None cuando la fecha es inválida"
+
+    # Verificar comportamiento en procesar_encolado_opciones
+    from app_web import procesar_encolado_opciones
+    from base_datos import GestorBaseDatos
+
+    db_temp = GestorBaseDatos(db_name="test_temp_venc_inv.db", reset_db=True)
+    try:
+        patas_invalidas = [{"accion": "BUY", "right": "C", "strike": 100.0, "cantidad": 1, "vencimiento": "INVALID_DATE"}]
+        res = procesar_encolado_opciones(db_temp, True, "Mercado", None, 1.0, patas_invalidas, {}, {}, "SPY", "Única", False)
+        assert res["ok"] is False
+        assert "Error en normalización de vencimiento" in res["mensaje"]
+    finally:
+        db_temp.borrar_base_datos()
+
+def test_procesar_encolado_opciones_firma_ast():
+    """
+    Verifica mediante AST que la llamada de producción a procesar_encolado_opciones:
+    - Ocurre dentro del flujo de submit_opt en app_web.py.
+    - Proporciona explícitamente el parámetro db_inst con el valor 'db'.
+    - Es la única llamada de producción a procesar_encolado_opciones en app_web.py.
+    """
+    import ast
+    with open("app_web.py", "r", encoding="utf-8") as f:
+        code = f.read()
+
+    tree = ast.parse(code)
+    calls_found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func_name = ""
+            if isinstance(node.func, ast.Name):
+                func_name = node.func.id
+            if func_name == "procesar_encolado_opciones":
+                calls_found.append(node)
+
+    assert len(calls_found) == 1, f"Se esperaba 1 llamada de producción a procesar_encolado_opciones en app_web.py, se encontraron {len(calls_found)}"
+    call_node = calls_found[0]
+
+    # Verificar presencia de db_inst como keyword argument
+    db_inst_kw = next((kw for kw in call_node.keywords if kw.arg == "db_inst"), None)
+    assert db_inst_kw is not None, "La llamada a procesar_encolado_opciones debe incluir el argumento keyword 'db_inst'"
+    assert isinstance(db_inst_kw.value, ast.Name) and db_inst_kw.value.id == "db", "El argumento 'db_inst' debe ser la instancia de base de datos 'db'"
+
+

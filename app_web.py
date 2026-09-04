@@ -2379,30 +2379,33 @@ with tabs[2]:
     except Exception:
         fecha_valoracion = dt.date.today()
 
+    venc_valido = True
     try:
         venc_date = normalizar_vencimiento(opt_vencimiento_str)
+        days_to_exp = max((venc_date - fecha_valoracion).days, 0)
+        T_inicial = days_to_exp / 365.0
     except ValueError as exc:
         st.error(str(exc))
-        venc_date = dt.date.today()
-        
-    days_to_exp = max((venc_date - fecha_valoracion).days, 0)
-    T_inicial = days_to_exp / 365.0
+        venc_valido = False
+        venc_date = None
+        days_to_exp = None
+        T_inicial = None
 
     st.caption("ℹ️ Las primas representan la valoración teórica inicial para el vencimiento contractual seleccionado. Este control permite simular el paso del tiempo y modifica la curva temporal y las griegas, pero no las primas iniciales de referencia.")
 
     c_sl1, c_sl2, c_sl3 = st.columns(3)
     vol_sim = c_sl1.slider("Volatilidad Implícita (σ)", min_value=5, max_value=150, value=25, step=5, format="%d%%", key="opt_vol_sim", on_change=invalidar_valoracion) / 100.0
     
-    max_dias_sim = max(days_to_exp, 1)
+    max_dias_sim = max(days_to_exp, 1) if (venc_valido and days_to_exp is not None) else 1
     if "opt_dias_sim" not in st.session_state:
-        st.session_state["opt_dias_sim"] = days_to_exp
+        st.session_state["opt_dias_sim"] = days_to_exp if (venc_valido and days_to_exp is not None) else 0
     else:
-        st.session_state["opt_dias_sim"] = min(max(int(st.session_state["opt_dias_sim"]), 0), max_dias_sim)
+        st.session_state["opt_dias_sim"] = min(max(int(st.session_state.get("opt_dias_sim", 0)), 0), max_dias_sim)
 
     dias_sim = c_sl2.slider("Días Restantes del Escenario Simulado", min_value=0, max_value=max_dias_sim, step=1, key="opt_dias_sim", on_change=invalidar_valoracion)
     tasa_sim = c_sl3.slider("Tasa Libre de Riesgo (r)", min_value=0.0, max_value=15.0, value=5.0, step=0.5, format="%.1f%%", key="opt_tasa_sim", on_change=invalidar_valoracion) / 100.0
 
-    T_escenario = max(dias_sim / 365.0, 0.0)
+    T_escenario = max(dias_sim / 365.0, 0.0) if venc_valido else 0.0
     
     st.divider()
     st.subheader("Configuración de las Patas (Legs)")
@@ -2479,20 +2482,23 @@ with tabs[2]:
         )
         
         # 5. Calcular Prima Teórica (Black-Scholes) con el spot único consolidado y T_inicial
-        sigma_calc = float(st.session_state.get("opt_vol_sim", 25)) / 100.0
-        r_calc = float(st.session_state.get("opt_tasa_sim", 5.0)) / 100.0
-        premium_bs = MotorBlackScholes.calcular_prima_bs(
-            S=spot_ref,
-            K=float(pata["strike"]),
-            T=T_inicial,
-            r=r_calc,
-            sigma=sigma_calc,
-            tipo=pata["right"]
-        )
-        pata["prima_teorica"] = float(premium_bs)
+        if venc_valido and T_inicial is not None:
+            sigma_calc = float(st.session_state.get("opt_vol_sim", 25)) / 100.0
+            r_calc = float(st.session_state.get("opt_tasa_sim", 5.0)) / 100.0
+            premium_bs = MotorBlackScholes.calcular_prima_bs(
+                S=spot_ref,
+                K=float(pata["strike"]),
+                T=T_inicial,
+                r=r_calc,
+                sigma=sigma_calc,
+                tipo=pata["right"]
+            )
+            pata["prima_teorica"] = float(premium_bs)
+            texto_prima = f"${premium_bs:.4f}" if premium_bs < 1.0 else f"${premium_bs:.2f}"
+        else:
+            pata.pop("prima_teorica", None)
+            texto_prima = "N/A"
         
-        # Renderizado de la prima teórica con 4 o 2 decimales según valor
-        texto_prima = f"${premium_bs:.4f}" if premium_bs < 1.0 else f"${premium_bs:.2f}"
         col_prem.markdown(f"**{texto_prima}**")
         
         # 6. Vencimiento deshabilitado (solo lectura) vinculado al vencimiento global
@@ -2601,7 +2607,7 @@ with tabs[2]:
     """, height=0, width=0)
         
     # --- GRÁFICO INTERACTIVO DE PLOTLY (SENSIBILIDAD Y VALOR TEMPORAL) ---
-    if st.session_state["patas_opciones"]:
+    if st.session_state["patas_opciones"] and venc_valido:
         # Calcular límites del subyacente para el gráfico
         k_list = [float(p["strike"]) for p in st.session_state["patas_opciones"]]
         min_k, max_k = min(k_list), max(k_list)
@@ -2825,14 +2831,17 @@ with tabs[2]:
         col_g1.metric("Delta Neto de Cartera (Δ)", f"{delta_net:.2f}", help="Sensibilidad respecto al precio del subyacente")
         col_g2.metric("Theta Neto Diario (Θ)", f"${theta_net:.2f}", help="Decaimiento temporal diario de la posición")
         col_g3.metric("Vega Neto (V)", f"${vega_net:.2f}", help="Sensibilidad respecto a cambios del 1% en Volatilidad")
+    elif st.session_state["patas_opciones"] and not venc_valido:
+        st.warning("⚠️ El gráfico de payoff y las griegas no están disponibles debido a que la fecha de vencimiento es inválida.")
 
-        # --- PARÁMETROS ALGORÍTMICOS Y ENVÍO ---
-        st.divider()
-        st.subheader("Parámetros Algorítmicos y Envío")
-        st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Configura el tipo de orden y las condiciones de entrada/salida que vigilará el Watchdog.</p>", unsafe_allow_html=True)
+    # --- PARÁMETROS ALGORÍTMICOS Y ENVÍO ---
+    st.divider()
+    st.subheader("Parámetros Algorítmicos y Envío")
+    st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Configura el tipo de orden y las condiciones de entrada/salida que vigilará el Watchdog.</p>", unsafe_allow_html=True)
 
-        # Cálculo automático de prima teórica neta acumulada por acción
-        credito_teorico_accion = 0.0
+    # Cálculo automático de prima teórica neta acumulada por acción
+    credito_teorico_accion = 0.0
+    if venc_valido:
         for p in st.session_state["patas_opciones"]:
             sign = 1.0 if p["accion"] == "SELL" else -1.0
             qty = float(p.get("cantidad", 1))
@@ -2841,191 +2850,196 @@ with tabs[2]:
         credito_teorico_total = credito_teorico_accion * 100.0
 
         st.info(f"💡 **Valoración Teórica Estimada:** `${credito_teorico_accion:+.2f}` / acción (~`${credito_teorico_total:+.2f}` USD por contrato de 100 acciones)")
+    else:
+        st.warning("⚠️ Valoración teórica deshabilitada debido a fecha de vencimiento inválida.")
 
-        # Tipo de orden + prima objetivo
-        col_o1, col_o2, col_o3 = st.columns(3)
-        with col_o1:
-            opt_tipo_lmt = st.selectbox("Tipo de Orden", ["Crédito/Débito Neto", "Mercado"], key="opt_tipo_lmt")
-        
-        opt_precio_entrada = None
-        if opt_tipo_lmt == "Crédito/Débito Neto":
-            with col_o2:
-                opt_precio_entrada = st.number_input(
-                    "Prima de Entrada Objetivo ($ neto, crédito = + / débito = -)",
-                    value=float(round(credito_teorico_accion, 2)), step=0.05, key="opt_prima_obj",
-                    help="Diferencia de prima solicitada. Crédito = positivo (+), Débito = negativo (-)."
-                )
-                st.caption(f"Equivale a: **${(opt_precio_entrada * 100.0):+.2f} USD** total por contrato")
-        
-        with col_o3:
-            opt_tif_val = st.selectbox(
-                "Validez (TIF)", 
-                ["DAY", "GTC"], 
-                index=0, 
-                key="opt_tif", 
-                help="**DAY**: Válida sólo durante el día de negociación actual.\n\n**GTC (Good-Til-Canceled)**: Permanece activa hasta su cancelación manual o ejecución, sujeta a las reglas del bróker."
+    # Tipo de orden + prima objetivo
+    col_o1, col_o2, col_o3 = st.columns(3)
+    with col_o1:
+        opt_tipo_lmt = st.selectbox("Tipo de Orden", ["Crédito/Débito Neto", "Mercado"], key="opt_tipo_lmt")
+    
+    opt_precio_entrada = None
+    if opt_tipo_lmt == "Crédito/Débito Neto":
+        with col_o2:
+            opt_precio_entrada = st.number_input(
+                "Prima de Entrada Objetivo ($ neto, crédito = + / débito = -)",
+                value=float(round(credito_teorico_accion, 2)), step=0.05, key="opt_prima_obj",
+                help="Diferencia de prima solicitada. Crédito = positivo (+), Débito = negativo (-)."
             )
+            st.caption(f"Equivale a: **${(opt_precio_entrada * 100.0):+.2f} USD** total por contrato")
+    
+    with col_o3:
+        opt_tif_val = st.selectbox(
+            "Validez (TIF)", 
+            ["DAY", "GTC"], 
+            index=0, 
+            key="opt_tif", 
+            help="**DAY**: Válida sólo durante el día de negociación actual.\n\n**GTC (Good-Til-Canceled)**: Permanece activa hasta su cancelación manual o ejecución, sujeta a las reglas del bróker."
+        )
 
-        st.divider()
+    st.divider()
 
-        # ── CONDICIONES DE ENTRADA ──────────────────────────────────────────
-        st.subheader("Condiciones de Entrada Avanzadas")
-        st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Activa las condiciones que deben cumplirse antes de que el Watchdog envíe la orden al mercado.</p>", unsafe_allow_html=True)
+    # ── CONDICIONES DE ENTRADA ──────────────────────────────────────────
+    st.subheader("Condiciones de Entrada Avanzadas")
+    st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Activa las condiciones que deben cumplirse antes de que el Watchdog envíe la orden al mercado.</p>", unsafe_allow_html=True)
 
-        # Funciones de campos para tarjetas de entrada (Opciones)
-        def fields_opt_horario(disabled):
-            c1, c2, c3 = st.columns(3)
-            opt_tipo_horario = c1.selectbox("Tipo", ["Rango", "Hora Fija"], key="opt_tipo_horario", disabled=disabled)
-            o_h_ini = c2.text_input("Hora Inicio", value="15:45", key="opt_h_ini", disabled=disabled)
-            if opt_tipo_horario == "Rango":
-                o_h_fin = c3.text_input("Hora Fin", value="21:30", key="opt_h_fin", disabled=disabled)
+    # Funciones de campos para tarjetas de entrada (Opciones)
+    def fields_opt_horario(disabled):
+        c1, c2, c3 = st.columns(3)
+        opt_tipo_horario = c1.selectbox("Tipo", ["Rango", "Hora Fija"], key="opt_tipo_horario", disabled=disabled)
+        o_h_ini = c2.text_input("Hora Inicio", value="15:45", key="opt_h_ini", disabled=disabled)
+        if opt_tipo_horario == "Rango":
+            o_h_fin = c3.text_input("Hora Fin", value="21:30", key="opt_h_fin", disabled=disabled)
+        else:
+            try:
+                import datetime as dt_mod
+                from datetime import timedelta
+                o_h_fin = (dt_mod.datetime.strptime(o_h_ini, "%H:%M") + timedelta(minutes=10)).strftime("%H:%M")
+            except Exception:
+                o_h_fin = "23:59"
+            c3.text_input("Hora Fin (Auto)", value=o_h_fin, disabled=True, key="opt_h_fin_auto")
+        return o_h_ini, o_h_fin
+
+    def fields_opt_vix(disabled):
+        c1, c2 = st.columns(2)
+        opt_vix_op = c1.selectbox("Operador", ["<", "<=", ">", ">="], key="opt_vix_op", disabled=disabled)
+        opt_vix_val = c2.number_input("Valor VIX", min_value=1.0, value=20.0, step=0.5, key="opt_vix_val", disabled=disabled)
+        return opt_vix_op, opt_vix_val
+
+    def fields_opt_sma(disabled):
+        c1, c2 = st.columns(2)
+        opt_sma_per = c1.number_input("Periodo SMA", min_value=5, value=200, step=5, key="opt_sma_per", disabled=disabled)
+        opt_sma_reg = c2.selectbox("Regla", ["Precio > SMA", "Precio < SMA"], key="opt_sma_reg", disabled=disabled)
+        return opt_sma_per, opt_sma_reg
+
+    def fields_opt_precio(disabled):
+        c1, c2 = st.columns(2)
+        opt_precio_op = c1.selectbox("Operador", ["<=", ">="], key="opt_precio_op", disabled=disabled)
+        opt_precio_val = c2.number_input("Valor Precio ($)", min_value=0.0, value=100.0, step=0.5, key="opt_precio_val", disabled=disabled)
+        return opt_precio_op, opt_precio_val
+
+    # Renderizado de Entrada (Opciones) en Grid 2x2
+    col1, col2 = st.columns(2)
+    with col1:
+        opt_act_horario, vals_opt_horario = render_watchdog_card("Ventana Horaria", "opt_act_horario", fields_opt_horario)
+        o_h_ini, o_h_fin = vals_opt_horario if vals_opt_horario else ("15:45", "21:30")
+        
+        opt_act_sma, vals_opt_sma = render_watchdog_card("Filtro SMA", "opt_act_sma", fields_opt_sma)
+        opt_sma_per, opt_sma_reg = vals_opt_sma if vals_opt_sma else (200, "Precio > SMA")
+        
+    with col2:
+        opt_act_vix, vals_opt_vix = render_watchdog_card("Filtro VIX", "opt_act_vix", fields_opt_vix)
+        opt_vix_op, opt_vix_val = vals_opt_vix if vals_opt_vix else ("<", 20.0)
+        
+        opt_act_precio, vals_opt_precio = render_watchdog_card("Precio Disparador", "opt_act_precio", fields_opt_precio)
+        opt_precio_op, opt_precio_val = vals_opt_precio if vals_opt_precio else ("<=", 100.0)
+
+    # Mensaje explícito cuando no hay condiciones de entrada avanzadas activadas
+    if not any([opt_act_horario, opt_act_vix, opt_act_sma, opt_act_precio]):
+        st.info("ℹ️ Sin condiciones de entrada avanzadas activadas, la estrategia será elegible para su envío inmediato por el Watchdog de Entradas.")
+
+    # Frecuencia (siempre visible debajo del grid)
+    opt_frecuencia = st.selectbox("Frecuencia de Ejecución", ["Única", "Diaria", "Semanal"], key="opt_frecuencia")
+            
+    st.divider()
+
+    # ── CONDICIONES DE SALIDA ───────────────────────────────────────────
+    st.subheader("Condiciones de Salida Avanzadas")
+    st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Activa y configura las reglas de gestión de riesgo que vigilará el Watchdog de Salidas.</p>", unsafe_allow_html=True)
+
+    # Funciones de campos para tarjetas de salida (Opciones)
+    def fields_opt_sl_tp(disabled):
+        c_chk1, c_chk2, _ = st.columns(3)
+        act_sl = c_chk1.checkbox("Activar Stop Loss", value=True, key="opt_sl_active", disabled=disabled)
+        act_tp = c_chk2.checkbox("Activar Take Profit", value=True, key="opt_tp_active", disabled=disabled)
+        
+        c1, c2, c3 = st.columns(3)
+        sl_disabled = disabled or not act_sl
+        tp_disabled = disabled or not act_tp
+        
+        opt_stop_loss = c1.number_input("Stop Loss ($)", value=-300.0, step=10.0, key="opt_sl_val", disabled=sl_disabled)
+        opt_take_profit = c2.number_input("Take Profit ($)", value=600.0, step=10.0, key="opt_tp_val", disabled=tp_disabled)
+        opt_dest_gestion = c3.selectbox("Gestión", ["App (Watchdog)", "IBKR (Broker)"], key="opt_dest_gestion", disabled=disabled)
+        return act_sl, opt_stop_loss, act_tp, opt_take_profit, opt_dest_gestion
+
+    def fields_opt_vix_sal(disabled):
+        opt_vix_max = st.number_input("VIX Máximo", min_value=1.0, value=28.0, step=0.5, key="opt_vix_max", disabled=disabled)
+        return opt_vix_max
+
+    def fields_opt_sma_sal(disabled):
+        c1, c2 = st.columns(2)
+        opt_sma_per_sal = c1.number_input("Periodo SMA", min_value=5, value=200, step=5, key="opt_sma_per_sal", disabled=disabled)
+        opt_sma_reg_sal = c2.selectbox("Regla", ["Precio < SMA", "Precio > SMA"], key="opt_sma_reg_sal", disabled=disabled)
+        return opt_sma_per_sal, opt_sma_reg_sal
+
+    def fields_opt_hora_sal(disabled):
+        opt_hora_sal = st.text_input("Hora Cierre", value="21:45", key="opt_hora_sal", disabled=disabled)
+        return opt_hora_sal
+
+    # Renderizado de Salida (Opciones) en Grid 2x2
+    col1, col2 = st.columns(2)
+    with col1:
+        opt_act_sl_tp, vals_opt_sl_tp = render_watchdog_card("Stop Loss / Take Profit", "opt_act_sl_tp", fields_opt_sl_tp)
+        opt_act_sl, opt_stop_loss, opt_act_tp, opt_take_profit, opt_dest_gestion = vals_opt_sl_tp if vals_opt_sl_tp else (True, -300.0, True, 600.0, "App (Watchdog)")
+        
+        opt_act_sma_sal, vals_opt_sma_sal = render_watchdog_card("Cerrar por SMA", "opt_act_sma_sal", fields_opt_sma_sal)
+        opt_sma_per_sal, opt_sma_reg_sal = vals_opt_sma_sal if vals_opt_sma_sal else (200, "Precio < SMA")
+        
+    with col2:
+        opt_act_vix_sal, opt_vix_max = render_watchdog_card("Cerrar por VIX", "opt_act_vix_sal", fields_opt_vix_sal)
+        if opt_vix_max is None:
+            opt_vix_max = 28.0
+            
+        opt_act_hora_sal, opt_hora_sal = render_watchdog_card("Hora Forzada", "opt_act_hora_sal", fields_opt_hora_sal)
+        if opt_hora_sal is None:
+            opt_hora_sal = "21:45"
+            
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # Reinicio diferido de checkboxes ANTES de su instanciación
+    if st.session_state.pop("_reset_confirm_encolar_opt", False):
+        st.session_state["chk_confirm_encolar_opt"] = False
+
+    if st.session_state.pop("_reset_permitir_dup_opt", False):
+        st.session_state["chk_permitir_dup_opt"] = False
+            
+    col_dup, col_conf = st.columns([1, 2])
+    with col_dup:
+        opt_permitir_duplicado = st.checkbox(
+            "Permitir estrategia duplicada",
+            key="chk_permitir_dup_opt",
+            help="ADVERTENCIA: Marcar esta casilla permitirá crear una orden idéntica duplicando la exposición acumulada."
+        )
+    
+    lbl_obj = f"${opt_precio_entrada:+.2f}" if opt_precio_entrada is not None else "Mercado"
+    with col_conf:
+        confirm_encolar = st.checkbox(
+            f"Confirmar encolado ({opt_tipo_lmt}: {lbl_obj} / acción | Valor Teórico: ${credito_teorico_accion:+.2f})",
+            key="chk_confirm_encolar_opt"
+        )
+    submit_opt = st.button("Encolar Estrategia Opciones", width="stretch", key="btn_encolar_opciones")
+
+    # Mensaje flash persistente desplegado inmediatamente debajo del botón de formulario
+    resultado_flash = st.session_state.get("_flash_encolado_opt")
+    if resultado_flash:
+        est_id_flash = resultado_flash["id"]
+        col_msg, col_cerrar = st.columns([0.92, 0.08])
+        with col_msg:
+            if resultado_flash.get("notificacion_ok", True):
+                st.success(f"🚀 Estrategia de opciones #{est_id_flash} encolada correctamente en estado PENDIENTE_ENTRADA. Notificación enviada a Discord.")
             else:
-                try:
-                    import datetime as dt_mod
-                    from datetime import timedelta
-                    o_h_fin = (dt_mod.datetime.strptime(o_h_ini, "%H:%M") + timedelta(minutes=10)).strftime("%H:%M")
-                except Exception:
-                    o_h_fin = "23:59"
-                c3.text_input("Hora Fin (Auto)", value=o_h_fin, disabled=True, key="opt_h_fin_auto")
-            return o_h_ini, o_h_fin
+                st.warning(f"🚀 Estrategia de opciones #{est_id_flash} encolada correctamente en estado PENDIENTE_ENTRADA (Nota: La notificación telemétrica a Discord no pudo enviarse).")
+        with col_cerrar:
+            if st.button("✖️", key="btn_cerrar_flash_opt"):
+                st.session_state.pop("_flash_encolado_opt", None)
+                st.rerun()
 
-        def fields_opt_vix(disabled):
-            c1, c2 = st.columns(2)
-            opt_vix_op = c1.selectbox("Operador", ["<", "<=", ">", ">="], key="opt_vix_op", disabled=disabled)
-            opt_vix_val = c2.number_input("Valor VIX", min_value=1.0, value=20.0, step=0.5, key="opt_vix_val", disabled=disabled)
-            return opt_vix_op, opt_vix_val
-
-        def fields_opt_sma(disabled):
-            c1, c2 = st.columns(2)
-            opt_sma_per = c1.number_input("Periodo SMA", min_value=5, value=200, step=5, key="opt_sma_per", disabled=disabled)
-            opt_sma_reg = c2.selectbox("Regla", ["Precio > SMA", "Precio < SMA"], key="opt_sma_reg", disabled=disabled)
-            return opt_sma_per, opt_sma_reg
-
-        def fields_opt_precio(disabled):
-            c1, c2 = st.columns(2)
-            opt_precio_op = c1.selectbox("Operador", ["<=", ">="], key="opt_precio_op", disabled=disabled)
-            opt_precio_val = c2.number_input("Valor Precio ($)", min_value=0.0, value=100.0, step=0.5, key="opt_precio_val", disabled=disabled)
-            return opt_precio_op, opt_precio_val
-
-        # Renderizado de Entrada (Opciones) en Grid 2x2
-        col1, col2 = st.columns(2)
-        with col1:
-            opt_act_horario, vals_opt_horario = render_watchdog_card("Ventana Horaria", "opt_act_horario", fields_opt_horario)
-            o_h_ini, o_h_fin = vals_opt_horario if vals_opt_horario else ("15:45", "21:30")
-            
-            opt_act_sma, vals_opt_sma = render_watchdog_card("Filtro SMA", "opt_act_sma", fields_opt_sma)
-            opt_sma_per, opt_sma_reg = vals_opt_sma if vals_opt_sma else (200, "Precio > SMA")
-            
-        with col2:
-            opt_act_vix, vals_opt_vix = render_watchdog_card("Filtro VIX", "opt_act_vix", fields_opt_vix)
-            opt_vix_op, opt_vix_val = vals_opt_vix if vals_opt_vix else ("<", 20.0)
-            
-            opt_act_precio, vals_opt_precio = render_watchdog_card("Precio Disparador", "opt_act_precio", fields_opt_precio)
-            opt_precio_op, opt_precio_val = vals_opt_precio if vals_opt_precio else ("<=", 100.0)
-
-        # Mensaje explícito cuando no hay condiciones de entrada avanzadas activadas
-        if not any([opt_act_horario, opt_act_vix, opt_act_sma, opt_act_precio]):
-            st.info("ℹ️ Sin condiciones de entrada avanzadas activadas, la estrategia será elegible para su envío inmediato por el Watchdog de Entradas.")
-
-        # Frecuencia (siempre visible debajo del grid)
-        opt_frecuencia = st.selectbox("Frecuencia de Ejecución", ["Única", "Diaria", "Semanal"], key="opt_frecuencia")
-                
-        st.divider()
-
-        # ── CONDICIONES DE SALIDA ───────────────────────────────────────────
-        st.subheader("Condiciones de Salida Avanzadas")
-        st.markdown("<p style='color:#94a3b8; margin-top:-10px;'>Activa y configura las reglas de gestión de riesgo que vigilará el Watchdog de Salidas.</p>", unsafe_allow_html=True)
-
-        # Funciones de campos para tarjetas de salida (Opciones)
-        def fields_opt_sl_tp(disabled):
-            c_chk1, c_chk2, _ = st.columns(3)
-            act_sl = c_chk1.checkbox("Activar Stop Loss", value=True, key="opt_sl_active", disabled=disabled)
-            act_tp = c_chk2.checkbox("Activar Take Profit", value=True, key="opt_tp_active", disabled=disabled)
-            
-            c1, c2, c3 = st.columns(3)
-            sl_disabled = disabled or not act_sl
-            tp_disabled = disabled or not act_tp
-            
-            opt_stop_loss = c1.number_input("Stop Loss ($)", value=-300.0, step=10.0, key="opt_sl_val", disabled=sl_disabled)
-            opt_take_profit = c2.number_input("Take Profit ($)", value=600.0, step=10.0, key="opt_tp_val", disabled=tp_disabled)
-            opt_dest_gestion = c3.selectbox("Gestión", ["App (Watchdog)", "IBKR (Broker)"], key="opt_dest_gestion", disabled=disabled)
-            return act_sl, opt_stop_loss, act_tp, opt_take_profit, opt_dest_gestion
-
-        def fields_opt_vix_sal(disabled):
-            opt_vix_max = st.number_input("VIX Máximo", min_value=1.0, value=28.0, step=0.5, key="opt_vix_max", disabled=disabled)
-            return opt_vix_max
-
-        def fields_opt_sma_sal(disabled):
-            c1, c2 = st.columns(2)
-            opt_sma_per_sal = c1.number_input("Periodo SMA", min_value=5, value=200, step=5, key="opt_sma_per_sal", disabled=disabled)
-            opt_sma_reg_sal = c2.selectbox("Regla", ["Precio < SMA", "Precio > SMA"], key="opt_sma_reg_sal", disabled=disabled)
-            return opt_sma_per_sal, opt_sma_reg_sal
-
-        def fields_opt_hora_sal(disabled):
-            opt_hora_sal = st.text_input("Hora Cierre", value="21:45", key="opt_hora_sal", disabled=disabled)
-            return opt_hora_sal
-
-        # Renderizado de Salida (Opciones) en Grid 2x2
-        col1, col2 = st.columns(2)
-        with col1:
-            opt_act_sl_tp, vals_opt_sl_tp = render_watchdog_card("Stop Loss / Take Profit", "opt_act_sl_tp", fields_opt_sl_tp)
-            opt_act_sl, opt_stop_loss, opt_act_tp, opt_take_profit, opt_dest_gestion = vals_opt_sl_tp if vals_opt_sl_tp else (True, -300.0, True, 600.0, "App (Watchdog)")
-            
-            opt_act_sma_sal, vals_opt_sma_sal = render_watchdog_card("Cerrar por SMA", "opt_act_sma_sal", fields_opt_sma_sal)
-            opt_sma_per_sal, opt_sma_reg_sal = vals_opt_sma_sal if vals_opt_sma_sal else (200, "Precio < SMA")
-            
-        with col2:
-            opt_act_vix_sal, opt_vix_max = render_watchdog_card("Cerrar por VIX", "opt_act_vix_sal", fields_opt_vix_sal)
-            if opt_vix_max is None:
-                opt_vix_max = 28.0
-                
-            opt_act_hora_sal, opt_hora_sal = render_watchdog_card("Hora Forzada", "opt_act_hora_sal", fields_opt_hora_sal)
-            if opt_hora_sal is None:
-                opt_hora_sal = "21:45"
-                
-        st.markdown("<br>", unsafe_allow_html=True)
+    if submit_opt:
+        st.session_state.pop("_flash_encolado_opt", None)
         
-        # Reinicio diferido de checkboxes ANTES de su instanciación
-        if st.session_state.pop("_reset_confirm_encolar_opt", False):
-            st.session_state["chk_confirm_encolar_opt"] = False
-
-        if st.session_state.pop("_reset_permitir_dup_opt", False):
-            st.session_state["chk_permitir_dup_opt"] = False
-                
-        col_dup, col_conf = st.columns([1, 2])
-        with col_dup:
-            opt_permitir_duplicado = st.checkbox(
-                "Permitir estrategia duplicada",
-                key="chk_permitir_dup_opt",
-                help="ADVERTENCIA: Marcar esta casilla permitirá crear una orden idéntica duplicando la exposición acumulada."
-            )
-        
-        lbl_obj = f"${opt_precio_entrada:+.2f}" if opt_precio_entrada is not None else "Mercado"
-        with col_conf:
-            confirm_encolar = st.checkbox(
-                f"Confirmar encolado ({opt_tipo_lmt}: {lbl_obj} / acción | Valor Teórico: ${credito_teorico_accion:+.2f})",
-                key="chk_confirm_encolar_opt"
-            )
-        submit_opt = st.button("Encolar Estrategia Opciones", width="stretch", key="btn_encolar_opciones")
-
-        # Mensaje flash persistente desplegado inmediatamente debajo del botón de formulario
-        resultado_flash = st.session_state.get("_flash_encolado_opt")
-        if resultado_flash:
-            est_id_flash = resultado_flash["id"]
-            col_msg, col_cerrar = st.columns([0.92, 0.08])
-            with col_msg:
-                if resultado_flash.get("notificacion_ok", True):
-                    st.success(f"🚀 Estrategia de opciones #{est_id_flash} encolada correctamente en estado PENDIENTE_ENTRADA. Notificación enviada a Discord.")
-                else:
-                    st.warning(f"🚀 Estrategia de opciones #{est_id_flash} encolada correctamente en estado PENDIENTE_ENTRADA (Nota: La notificación telemétrica a Discord no pudo enviarse).")
-            with col_cerrar:
-                if st.button("✖️", key="btn_cerrar_flash_opt"):
-                    st.session_state.pop("_flash_encolado_opt", None)
-                    st.rerun()
-
-        if submit_opt:
-            st.session_state.pop("_flash_encolado_opt", None)
-            
+        if not venc_valido:
+            st.error("❌ No se puede encolar la estrategia con una fecha de vencimiento inválida.")
+        else:
             # Construimos condiciones de entrada
             opt_cond_ent = {}
             if opt_act_horario:
@@ -3056,6 +3070,7 @@ with tabs[2]:
                 opt_cond_sal["cierre_horario"] = opt_hora_sal
 
             res = procesar_encolado_opciones(
+                db_inst=db,
                 confirm_encolar=confirm_encolar,
                 opt_tipo_lmt=opt_tipo_lmt,
                 opt_precio_entrada=opt_precio_entrada,
